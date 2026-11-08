@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FS_Lab · مختبر C++ التفاعلي</title>
+<meta name="description" content="اكتب كود C++ وشاهد تنفيذه سطرًا بسطر مع الشرح: الذاكرة، والشروط، وجدول التتبع، والكونسول. مع م. فرج الأحجل.">
+<link rel="stylesheet" href="css/style.css?v=13">
+</head>
+<body>
+
+<header class="top">
+  <a class="logo" href="#"><span class="f">F</span><span class="s">S</span></a>
+  <div class="sep"></div>
+  <div class="who">م. فرج الأحجل</div>
+  <button class="menu-btn" id="menuBtn" aria-label="الدروس">☰ الدروس</button>
+  <div class="crumb"><b class="brand">FS_Lab</b> · مختبر <bdi dir="ltr">C++</bdi> التفاعلي</div>
+  <div class="tag" id="tag">L1 · C++</div>
+</header>
+
+<main class="app">
+  <!-- lessons -->
+  <aside class="panel side" id="side">
+    <h2>الدروس</h2>
+    <div class="scroll">
+      <div class="lessons" id="lessons"></div>
+      <div class="lesson" id="lesson"></div>
+    </div>
+  </aside>
+
+  <!-- editor -->
+  <section class="panel ed-panel">
+    <div class="ph"><span id="edTitle">المحرر</span></div>
+    <div class="task" id="task"></div>
+    <div class="editor">
+      <div class="gutter" id="gutter"></div>
+      <div class="code-wrap" id="wrap">
+        <div class="lnbar" id="lnbar"></div>
+        <pre id="hl" aria-hidden="true"></pre>
+        <textarea id="code" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="محرر الكود"></textarea>
+      </div>
+    </div>
+    <div class="controls">
+      <button class="btn main" id="bStep" title="تنفيذ السطر التالي (→ أو F10)">خطوة ←</button>
+      <button class="btn" id="bBack" title="الرجوع خطوة (←)">→ رجوع</button>
+      <button class="btn" id="bPlay">▶ تشغيل تلقائي</button>
+      <button class="btn" id="bRun" title="Ctrl + Enter">⏭ النتيجة مباشرة</button>
+      <button class="btn" id="bReset">⟲ إعادة</button>
+      <button class="btn check" id="bCheck" style="display:none">✓ تحقّق من الحل</button>
+      <button class="btn" id="bSol" style="display:none">💡 الحل النموذجي</button>
+      <label class="speed">السرعة <input type="range" id="speed" min="1" max="10" value="5"></label>
+    </div>
+    <div class="tl off" id="tl">
+      <button class="tlb" id="bFirst" title="أول خطوة (Home)">⏮</button>
+      <div class="tlt"><div class="tlm" id="tlM"></div><input type="range" id="tlR" min="0" max="0" value="0" dir="rtl" aria-label="الانتقال إلى خطوة"></div>
+      <button class="tlb" id="bLast" title="آخر خطوة (End)">⏭</button>
+      <span class="tll" id="tlL">شريط الخطوات: اسحبه للانتقال إلى أي مرحلة</span>
+    </div>
+  </section>
+
+  <!-- visualization -->
+  <section class="panel viz">
+    <div class="box">
+      <div class="ph">الشرح</div>
+      <div class="explain" id="explain"></div>
+    </div>
+    <div class="box results" id="results"></div>
+    <div class="box">
+      <div class="ph">الذاكرة <span class="kbd">· كل صندوق متغير، والبرتقالي تغيّر في هذه الخطوة</span></div>
+      <div class="mem" id="mem"></div>
+    </div>
+    <div class="box">
+      <div class="ph">جدول التتبع <span class="kbd" id="traceCap"></span></div>
+      <div class="trace" id="trace"></div>
+    </div>
+    <div class="box">
+      <div class="ph">الكونسول</div>
+      <div class="console" id="console"></div>
+      <div class="inrow" id="inrow">
+        <input id="inField" placeholder="اكتب المدخلات هنا ثم Enter" dir="ltr" autocomplete="off">
+        <button class="btn" id="inSend">إدخال</button>
+      </div>
+    </div>
+  </section>
+</main>
+<div class="foot">FS Courses · م. فرج الأحجل · FS_Lab يضم حاليًا مواضيع برمجة 1 وبرمجة 2 وهياكل البيانات، وتُضاف إليه مواضيع جديدة تباعًا</div>
+
+<script src="js/interpreter.js?v=13"></script>
+<script src="js/lessons.js?v=13"></script>
+<script src="js/lessons_p2.js?v=13"></script>
+<script src="js/lessons_p2b.js?v=13"></script>
+<script src="js/lessons_ds.js?v=13"></script>
+<script src="js/quiz_core.js?v=13"></script>
+<script src="js/quiz_p1.js?v=13"></script>
+<script src="js/quiz_p2.js?v=13"></script>
+<script src="js/quiz_ds.js?v=13"></script>
+<script src="js/quiz_bank_p1.js?v=13"></script>
+<script src="js/quiz_bank_p2.js?v=13"></script>
+<script src="js/quiz_bank_ds.js?v=13"></script>
+<script src="js/app.js?v=13"></script>
+</body>
+</html>
