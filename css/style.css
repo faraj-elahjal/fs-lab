@@ -29,6 +29,12 @@ code { font-family: var(--mono); font-size: .92em; background: var(--card); bord
 .top .crumb { margin-left: auto; color: var(--dim); direction: rtl; font-size: 14px; }
 .top .crumb .brand { color: var(--white); font-family: var(--mono); letter-spacing: .5px; }
 .top .tag { border: 1.5px solid var(--teal); color: var(--teal); border-radius: 99px; padding: 1px 12px; font: 700 13px var(--mono); }
+.top .contact { display: flex; gap: 6px; }
+.top .contact a, .fcontact a { display: inline-flex; align-items: center; justify-content: center; gap: 6px; color: var(--dim); text-decoration: none; }
+.top .contact a { width: 32px; height: 32px; border: 1px solid var(--line); border-radius: 50%; }
+.top .contact a:hover, .fcontact a:hover { color: var(--white); border-color: var(--teal); }
+.top .contact a.tg:hover, .fcontact a.tg:hover { color: #229ed9; }
+.fcontact { margin-top: 8px; display: flex; justify-content: center; flex-wrap: wrap; gap: 8px 18px; align-items: center; }
 .menu-btn { display: none; background: none; border: 1px solid var(--line); color: var(--white); border-radius: 8px; padding: 2px 10px; }
 
 /* ---------- layout ---------- */
