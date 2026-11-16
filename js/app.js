@@ -80,106 +80,245 @@ code.addEventListener('keydown', (e) => {
 });
 window.addEventListener('resize', paint);
 
-/* ---------------- lessons ---------------- */
+/* ---------------- lessons + navigation (hash routes: #/ · #/c/<i> · #/l/<id>/<tab>/<k>) ---------------- */
 const LESSONS = window.FS_LESSONS;
 let lesson = LESSONS[0], item = null, solved = store.get('solved', {});
-/* ---- sidebar: course tabs → lessons of that course → the open lesson expands in place ---- */
 const COURSES = [...new Set(LESSONS.map((L) => L.course))];
+const COURSE_INFO = {
+  'برمجة 1': { sub: 'المتغيرات، والعمليات الحسابية، والشروط، والحلقات، والمصفوفات الأحادية.', c: '#2dd4bf' },
+  'برمجة 2': { sub: 'الدوال، والمصفوفات الأحادية والثنائية، والنصوص، والمؤشرات، والذاكرة الديناميكية، والسجلات.', c: '#3b82f6' },
+  'هياكل البيانات': { sub: 'القوائم المترابطة، والمكدس، والطابور، والاستدعاء الذاتي، والأشجار، والترتيب والبحث.', c: '#f59e42' },
+};
+const cinfo = (c) => COURSE_INFO[c] || { sub: '', c: '#2dd4bf' };
 const QN = 10;                                           // questions per quiz attempt (drawn from the lesson's bank)
-let viewCourse = null, seen = store.get('seen', {});
+let seen = store.get('seen', {}), tab = 'concept', traceItem = null;
+const strip = (s) => String(s).replace(/<[^>]*>/g, '');
 const solvedIn = (L) => L.challenges.filter((c) => solved[c.id]).length;
-const quizBest = (L) => { const b = store.get('quiz.' + L.id, null); return b === null ? null : typeof b === 'number' ? { s: b, n: L.quiz.length } : b; };
-function lessonDone(L) { return L.challenges.length && L.challenges.every((c) => solved[c.id]); }
-function renderLessons() {
-  if (!viewCourse) viewCourse = lesson.course;
-  let html = '<div class="ctabs">' + COURSES.map((c) => {
-    const Ls = LESSONS.filter((L) => L.course === c);
-    const t = Ls.reduce((a, L) => a + L.challenges.length, 0), s = Ls.reduce((a, L) => a + solvedIn(L), 0);
-    return `<button class="${c === viewCourse ? 'on' : ''} ${c === lesson.course ? 'cur' : ''}" data-c="${esc(c)}"><b>${esc(c)}</b><span>${Ls.length} دروس · <bdi dir="ltr">${t ? Math.round(100 * s / t) : 0}%</bdi></span><i style="width:${t ? 100 * s / t : 0}%"></i></button>`;
-  }).join('') + '</div>';
-  let n = 0;
-  LESSONS.forEach((L, i) => {
-    if (L.course !== viewCourse) return;
-    n++;
-    const on = L === lesson, done = lessonDone(L), sv = solvedIn(L);
-    html += `<button class="lbtn ${on ? 'on' : ''} ${done ? 'done' : ''}" data-i="${i}"><span class="num">${done ? '✓' : n}</span><span class="lt">${bidi(L.title)}</span><span class="lp">${sv}/${L.challenges.length}</span></button>`;
-    if (on) html += lessonBody(L);
-  });
-  $('lessons').innerHTML = html;
-  $('lesson').innerHTML = '';
-  $('lessons').querySelectorAll('.ctabs button').forEach((b) => b.onclick = () => { viewCourse = b.dataset.c; renderLessons(); });
-  $('lessons').querySelectorAll('.lbtn').forEach((b) => b.onclick = () => {
-    const L = LESSONS[+b.dataset.i];
-    if (L === lesson) { $('lessons').classList.toggle('fold'); return; }
-    $('lessons').classList.remove('fold'); openLesson(L); closeSide();
-  });
-  const box = $('lessons').querySelector('.lesson-in');
-  if (box) {
-    const qb = $('quizBtn');
-    if (qb) qb.onclick = () => { closeSide(); startQuiz(lesson); };
-    box.querySelectorAll('.items button').forEach((b) => b.onclick = () => {
-      const k = b.dataset.k, x = k[0] === 'e' ? lesson.examples[+k.slice(1)] : lesson.challenges[+k.slice(1)];
-      openItem(x); closeSide();
-    });
-    box.querySelectorAll('[data-go]').forEach((b) => b.onclick = () => { openLesson(LESSONS[+b.dataset.go]); });
-  }
-  $('tag').textContent = lesson.tag;
+const nQuiz = (L) => (L.quiz || []).length;
+const quizBest = (L) => { const b = store.get('quiz.' + L.id, null); return b === null ? null : typeof b === 'number' ? { s: b, n: nQuiz(L) } : b; };
+const lessonsOf = (c) => LESSONS.filter((L) => L.course === c);
+function lessonProg(L) {
+  const ex = L.examples.filter((x) => seen[x.id]).length, ch = solvedIn(L), b = quizBest(L);
+  const tot = L.examples.length + L.challenges.length + (nQuiz(L) ? 1 : 0);
+  return { ex, ch, b, pc: tot ? (ex + ch + (b && b.s / b.n >= .8 ? 1 : 0)) / tot : 0 };
 }
-function lessonBody(L) {
-  const ex = L.examples.map((x, i) => `<button data-k="e${i}" class="${item === x ? 'on' : ''} ${seen[x.id] ? 'seen' : ''}"><span class="ix">${i + 1}</span><span>${x.title}${x.note ? `<small>${x.note}</small>` : ''}</span></button>`).join('');
-  const ch = L.challenges.map((x, i) => `<button data-k="c${i}" class="ch ${item === x ? 'on' : ''} ${solved[x.id] ? 'solved' : ''}"><span class="ix">${i + 1}</span><span>${x.title}</span></button>`).join('');
-  const nq = (L.quiz || []).length, best = quizBest(L), take = Math.min(QN, nq);
-  const qb = nq ? `<button class="quiz-btn" id="quizBtn"><b>📝 اختبر نفسك</b><span>${take} أسئلة عشوائية من بنك فيه ${nq} سؤالًا${best ? ` · أفضل نتيجة ${best.s}/${best.n}` : ''}</span></button>` : '';
-  const idx = LESSONS.indexOf(L), prev = LESSONS[idx - 1], next = LESSONS[idx + 1];
-  const sv = solvedIn(L);
-  return `<div class="lesson-in">
-    <details class="concept-d" ${store.get('concept', true) ? 'open' : ''}><summary>فكرة الدرس</summary><div class="concept">${L.concept}</div></details>
-    <div class="steps">${['شاهد الأمثلة', 'حلّ الأسئلة', 'اختبر نفسك'].map((t, k) => `<span class="${k === (item && item.tests ? 1 : 0) ? 'on' : ''} ${k === 0 && L.examples.every((x) => seen[x.id]) || k === 1 && lessonDone(L) || k === 2 && best && best.s / best.n >= .8 ? 'ok' : ''}">${k + 1}. ${t}</span>`).join('')}</div>
-    <h4>أمثلة جاهزة <small>اختر مثالًا ثم اضغط «خطوة»</small></h4><div class="items">${ex}</div>
-    <h4>أسئلة مقالية <small>اكتب البرنامج وتحقّق منه · محلول ${sv} من ${L.challenges.length}</small></h4><div class="items">${ch}</div>
-    ${qb}
-    <div class="lnav">${prev ? `<button class="btn" data-go="${idx - 1}">→ الدرس السابق</button>` : '<span></span>'}${next ? `<button class="btn" data-go="${idx + 1}">الدرس التالي ←</button>` : ''}</div>
-  </div>`;
+const courseProg = (c) => { const Ls = lessonsOf(c); return Ls.reduce((a, L) => a + lessonProg(L).pc, 0) / Ls.length; };
+const pct = (x) => `<bdi dir="ltr">${Math.round(100 * x)}%</bdi>`;
+const href = (L, t, k) => '#/l/' + L.id + (t ? '/' + t : '') + (k != null ? '/' + k : '');
+function go(h) { if (location.hash === h) route(); else location.hash = h; }
+const itemsOf = (t) => (t === 'ch' ? lesson.challenges : t === 'trace' ? [traceItem] : lesson.examples);
+
+function show(v) {
+  ['vHome', 'vCourse', 'vLesson'].forEach((id) => { $(id).hidden = id !== v; });
+  document.body.dataset.view = v;
+  setMenu(false);
+}
+function setMenu(on) { document.body.classList.toggle('menu-open', on); $('menuBtn').setAttribute('aria-expanded', on); }
+$('menuBtn').onclick = () => setMenu(!document.body.classList.contains('menu-open'));
+function renderNav(active) {
+  $('nav').innerHTML = `<a href="#/" class="${active === 'home' ? 'on' : ''}">الرئيسية</a>` +
+    COURSES.map((c, i) => `<a href="#/c/${i}" class="${active === c ? 'on' : ''}" style="--c:${cinfo(c).c}">${esc(c)}</a>`).join('');
+}
+const bar = (x, c) => `<div class="bar"><i style="width:${Math.round(100 * x)}%;${c ? 'background:' + c : ''}"></i></div>`;
+
+/* ---- home ---- */
+function viewHome() {
+  show('vHome'); renderNav('home'); document.title = 'FS_Lab · مختبر C++ التفاعلي';
+  const lastH = store.get('last', ''), last = parseHash(lastH), lastL = last[0] === 'l' && LESSONS.find((L) => L.id === last[1]);
+  const nQ = LESSONS.reduce((a, L) => a + nQuiz(L), 0), nC = LESSONS.reduce((a, L) => a + L.challenges.length, 0), nE = LESSONS.reduce((a, L) => a + L.examples.length, 0);
+  const cont = lastL
+    ? `<a class="btn main big" href="${lastH}">تابع من حيث توقفت <i>←</i></a>`
+    : `<a class="btn main big" href="${href(LESSONS[0])}">ابدأ من الدرس الأول <i>←</i></a>`;
+  $('vHome').innerHTML = `
+  <section class="hero">
+    <div class="hero-t">
+      <span class="eyebrow">مختبر <bdi dir="ltr">C++</bdi> التفاعلي</span>
+      <h1>افهم ما يحدث <em>داخل</em> برنامجك، سطرًا بسطر</h1>
+      <p>اختر مثالًا أو اكتب برنامجك، ثم نفّذه خطوة بخطوة: ترى قيمة كل متغير في الذاكرة، ونتيجة كل شرط، وجدول تتبّع الحلقات، وما يظهر على الشاشة، مع شرح بالعربية لكل خطوة.</p>
+      <div class="cta">${cont}<a class="btn big ghost" href="#/c/0" id="toCourses">تصفّح المواد</a></div>
+      ${lastL ? `<div class="last">آخر درس فتحته: <a href="${lastH}">${bidi(lastL.title)}</a> <span>· ${esc(lastL.course)}</span></div>` : ''}
+    </div>
+    <div class="demo" aria-hidden="true">
+      <div class="demo-bar"><i></i><i></i><i></i><span>main.cpp</span></div>
+      <div class="demo-code"><div><em>1</em><span class="t">int</span> <span class="id">x</span> = <span class="n">5</span>;</div><div class="on"><em>2</em><span class="id">x</span> = <span class="id">x</span> * <span class="n">2</span>;</div><div><em>3</em><span class="lib">cout</span> &lt;&lt; <span class="id">x</span>;</div></div>
+      <div class="demo-side">
+        <div class="demo-msg"><span class="sn">2</span> تُحسب قيمة <code>x * 2</code> وتُخزَّن في <code>x</code>، فتصبح 10.</div>
+        <div class="demo-mem"><div class="var chg"><div class="nm">x</div><div class="bx">10</div><div class="ty">int</div></div></div>
+      </div>
+    </div>
+  </section>
+  <section class="stats">
+    <div><b>${LESSONS.length}</b><span>درسًا تفاعليًا</span></div>
+    <div><b>${nE}</b><span>مثالًا يُنفَّذ خطوة بخطوة</span></div>
+    <div><b>${nC}</b><span>سؤالًا مقاليًا يُصحَّح تلقائيًا</span></div>
+    <div><b>${nQ}</b><span>سؤال اختبار ذاتي</span></div>
+  </section>
+  <section class="sec" id="courses">
+    <h2>المواد</h2>
+    <div class="courses">${COURSES.map((c, i) => {
+      const Ls = lessonsOf(c), p = courseProg(c), info = cinfo(c);
+      return `<a class="ccard" href="#/c/${i}" style="--c:${info.c}">
+        <span class="cc-n">${String(i + 1).padStart(2, '0')}</span>
+        <h3>${esc(c)}</h3><p>${info.sub}</p>
+        <div class="cc-meta">${Ls.length} دروس · ${Ls.reduce((a, L) => a + L.examples.length, 0)} مثالًا · ${Ls.reduce((a, L) => a + nQuiz(L) + L.challenges.length, 0)} سؤالًا</div>
+        ${bar(p, info.c)}<div class="cc-f"><span>${p ? pct(p) + ' مكتمل' : 'لم تبدأ بعد'}</span><b>ادخل ←</b></div>
+      </a>`;
+    }).join('')}</div>
+  </section>
+  <section class="sec">
+    <h2>كيف تتعلّم في <bdi dir="ltr">FS_Lab</bdi>؟</h2>
+    <ol class="how">
+      <li><b>اقرأ الفكرة</b><span>شرح مختصر لمفهوم الدرس في بطاقة واحدة.</span></li>
+      <li><b>نفّذ الأمثلة</b><span>خطوة بخطوة، وارجع أو انتقل إلى أي خطوة من شريط الخطوات.</span></li>
+      <li><b>حلّ الأسئلة المقالية</b><span>اكتب البرنامج، ويُختبر حلّك على أكثر من إدخال.</span></li>
+      <li><b>اختبر نفسك</b><span>عشرة أسئلة عشوائية في كل محاولة، ونتيجتك فورًا.</span></li>
+    </ol>
+    <p class="note">يُحفظ تقدّمك على هذا الجهاز تلقائيًا، ولا يُرسَل الكود إلى أي خادم.</p>
+  </section>`;
+  $('toCourses').onclick = (e) => { e.preventDefault(); $('courses').scrollIntoView({ behavior: 'smooth' }); };
+}
+
+/* ---- course: lesson cards ---- */
+function viewCourse(i) {
+  const c = COURSES[i] || COURSES[0], info = cinfo(c), Ls = lessonsOf(c), p = courseProg(c);
+  show('vCourse'); renderNav(c); document.title = c + ' · FS_Lab';
+  $('vCourse').innerHTML = `
+  <section class="chead" style="--c:${info.c}">
+    <nav class="crumbs"><a href="#/">الرئيسية</a><i>/</i><span>${esc(c)}</span></nav>
+    <h1>${esc(c)}</h1><p>${info.sub}</p>
+    <div class="cprog">${bar(p, info.c)}<span>${pct(p)} مكتمل · ${Ls.length} دروس</span></div>
+  </section>
+  <section class="lgrid">${Ls.map((L, k) => {
+    const g = lessonProg(L), st = g.pc >= 1 ? 'done' : g.pc > 0 ? 'go' : '';
+    return `<a class="lcard ${st}" href="${href(L)}" style="--c:${info.c}">
+      <div class="lc-top"><span class="lc-n">${g.pc >= 1 ? '✓' : k + 1}</span><span class="ltag">${esc(L.tag)}</span>${st ? `<span class="lc-st">${st === 'done' ? 'مكتمل' : 'قيد التعلّم'}</span>` : ''}</div>
+      <h3>${bidi(L.title)}</h3>
+      <ul class="lc-meta">
+        <li><b>${g.ex}/${L.examples.length}</b> أمثلة</li>
+        ${L.challenges.length ? `<li><b>${g.ch}/${L.challenges.length}</b> أسئلة مقالية</li>` : ''}
+        ${nQuiz(L) ? `<li>${g.b ? `<b>${g.b.s}/${g.b.n}</b> أفضل نتيجة` : `<b>${nQuiz(L)}</b> سؤال اختبار`}</li>` : ''}
+      </ul>
+      ${bar(g.pc, info.c)}
+    </a>`;
+  }).join('')}</section>`;
+  window.scrollTo(0, 0);
+}
+
+/* ---- lesson: header + tabs, concept, quiz card, workspace ---- */
+function renderLHead() {
+  const L = lesson, i = COURSES.indexOf(L.course), info = cinfo(L.course), Ls = lessonsOf(L.course), k = Ls.indexOf(L);
+  const idx = LESSONS.indexOf(L), prev = LESSONS[idx - 1], next = LESSONS[idx + 1], g = lessonProg(L);
+  const T = [['concept', 'الفكرة', ''], ['ex', 'الأمثلة', `${g.ex}/${L.examples.length}`]];
+  if (L.challenges.length) T.push(['ch', 'الأسئلة المقالية', `${g.ch}/${L.challenges.length}`]);
+  if (nQuiz(L)) T.push(['quiz', 'اختبر نفسك', g.b ? `${g.b.s}/${g.b.n}` : '']);
+  const cur = tab === 'trace' ? 'ex' : tab;
+  $('lhead').style.setProperty('--c', info.c);
+  $('lhead').innerHTML = `
+    <div class="lh-row">
+      <nav class="crumbs"><a href="#/">الرئيسية</a><i>/</i><a href="#/c/${i}">${esc(L.course)}</a><i>/</i><span>الدرس ${k + 1} من ${Ls.length}</span></nav>
+      <div class="lh-nav">${prev ? `<a class="btn sm ghost" href="${href(prev)}" title="${esc(strip(prev.title))}"><i>→</i> الدرس السابق</a>` : ''}${next ? `<a class="btn sm ghost" href="${href(next)}" title="${esc(strip(next.title))}">الدرس التالي <i>←</i></a>` : ''}</div>
+    </div>
+    <div class="lh-title"><h1>${bidi(L.title)}</h1><div class="lprog">${bar(g.pc, info.c)}<span>${pct(g.pc)}</span></div></div>
+    <nav class="tabs" role="tablist">${T.map(([t, name, n], j) => `<a role="tab" aria-selected="${t === cur}" class="tab ${t === cur ? 'on' : ''}" href="${href(L, t)}"><b>${j + 1}</b><span>${name}</span>${n ? `<span class="cnt"><bdi dir="ltr">${n}</bdi></span>` : ''}</a>`).join('')}</nav>`;
+}
+function renderConcept() {
+  const L = lesson, n = L.examples.length;
+  $('lConcept').innerHTML = `<article class="concept-card"><h2>فكرة الدرس</h2><div class="concept">${L.concept}</div></article>
+    <div class="next-cta"><a class="btn main big" href="${href(L, 'ex', 0)}">نفّذ الأمثلة خطوة بخطوة <i>←</i></a><span>${n} ${n > 10 ? 'مثالًا' : 'أمثلة'} جاهزة في هذا الدرس</span></div>`;
+}
+function renderQuizPane() {
+  const L = lesson, nq = nQuiz(L), b = quizBest(L), nx = LESSONS[LESSONS.indexOf(L) + 1];
+  $('lQuiz').innerHTML = `<article class="quiz-card">
+    <h2>اختبر نفسك في «${bidi(L.title)}»</h2>
+    <p>في كل محاولة <b>${Math.min(QN, nq)} أسئلة</b> عشوائية من بنك فيه <b>${nq}</b> سؤالًا: اختيار من متعدد، وأسئلة تتبّع تكتب فيها ناتج البرنامج. تظهر الإجابة الصحيحة وسببها بعد كل سؤال.</p>
+    ${b ? `<div class="best"><span>أفضل نتيجة لك</span><b><bdi dir="ltr">${b.s} / ${b.n}</bdi></b>${b.s / b.n >= .8 ? '<em>ممتاز</em>' : ''}</div>` : ''}
+    <div class="cta"><button class="btn main big" id="quizGo">${b ? 'محاولة جديدة' : 'ابدأ الاختبار'} <i>←</i></button>${nx ? `<a class="btn big ghost" href="${href(nx)}">الدرس التالي</a>` : ''}</div>
+  </article>`;
+  $('quizGo').onclick = () => startQuiz(L);
+}
+function renderRail() {
+  const list = itemsOf(tab), isCh = tab === 'ch', k = list.indexOf(item);
+  const ok = (x) => (isCh ? solved[x.id] : seen[x.id]);
+  const n = nextStep();
+  $('rail').innerHTML = `<div class="rh"><b>${tab === 'trace' ? 'سؤال تتبّع' : isCh ? 'الأسئلة المقالية' : 'الأمثلة'}</b>${tab === 'trace' ? '' : `<span><bdi dir="ltr">${list.filter(ok).length}/${list.length}</bdi></span>`}</div>
+    <div class="rl">${list.map((x, i) => `<a href="${tab === 'trace' ? href(lesson, 'trace') : href(lesson, tab, i)}" class="ri ${x === item ? 'on' : ''} ${ok(x) ? 'ok' : ''}"><span class="ix">${ok(x) ? '✓' : i + 1}</span><span class="rt">${x.title}${x.note ? `<small>${x.note}</small>` : ''}</span></a>`).join('')}</div>
+    ${n ? `<a class="rnext" href="${n.href}"><small>بعد ذلك</small>${bidi(esc(n.label))} ←</a>` : ''}`;
+  $('itSel').innerHTML = list.map((x, i) => `<option value="${i}" ${x === item ? 'selected' : ''}>${i + 1}. ${esc(strip(x.title))}${ok(x) ? ' ✓' : ''}</option>`).join('');
+  $('itSel').disabled = list.length < 2;
+  $('itPrev').disabled = k <= 0; $('itNext').disabled = k < 0 || k >= list.length - 1;
+}
+$('itSel').onchange = () => go(href(lesson, tab, +$('itSel').value));
+$('itPrev').onclick = () => { const k = itemsOf(tab).indexOf(item); if (k > 0) go(href(lesson, tab, k - 1)); };
+$('itNext').onclick = () => { const l = itemsOf(tab), k = l.indexOf(item); if (k < l.length - 1) go(href(lesson, tab, k + 1)); };
+function refreshProgress() { renderLHead(); if (!$('work').hidden) renderRail(); }
+
+function parseHash(h) { return String(h || '').replace(/^#\/?/, '').split('/'); }
+function route() {
+  if (Q) closeQuiz();
+  const p = parseHash(location.hash);
+  if (p[0] === 'c') return viewCourse(+p[1] || 0);
+  if (p[0] === 'l') { const L = LESSONS.find((x) => x.id === p[1]); if (L) return viewLesson(L, p[2], p[3]); }
+  viewHome();
+  window.scrollTo(0, 0);
+}
+function viewLesson(L, t, k) {
+  if (!['concept', 'ex', 'ch', 'quiz', 'trace'].includes(t)) t = 'concept';
+  if (t === 'ch' && !L.challenges.length) t = 'ex';
+  if (t === 'quiz' && !nQuiz(L)) t = 'ex';
+  if (t === 'trace' && (!traceItem || L !== lesson)) t = 'ex';
+  const moved = L !== lesson || t !== tab || document.body.dataset.view !== 'vLesson';
+  lesson = L; tab = t;
+  store.set('lesson', L.id); store.set('last', href(L, t));
+  show('vLesson'); renderNav(L.course); document.title = strip(L.title) + ' · FS_Lab';
+  const work = t === 'ex' || t === 'ch' || t === 'trace';
+  $('lConcept').hidden = t !== 'concept'; $('lQuiz').hidden = t !== 'quiz'; $('work').hidden = !work;
+  $('work').dataset.tab = t;
+  if (t === 'concept') renderConcept();
+  if (t === 'quiz') renderQuizPane();
+  if (work) {
+    const list = itemsOf(t), key = 'idx.' + L.id + '.' + t;
+    let j = k === undefined || k === '' ? store.get(key, 0) : +k || 0;
+    j = Math.max(0, Math.min(list.length - 1, j));
+    const x = list[j];
+    if (t !== 'trace') { store.set(key, j); store.set('last', href(L, t, j)); }
+    if (x !== item) openItem(x); else { renderRail(); paint(); }
+  }
+  renderLHead();
+  if (moved) window.scrollTo(0, 0);
 }
 function markSeen() {
   if (!item || !item.id || seen[item.id] || !lesson.examples.includes(item)) return;
-  seen[item.id] = true; store.set('seen', seen); renderLessons();
+  seen[item.id] = true; store.set('seen', seen); refreshProgress();
 }
-function closeSide() { $('side').classList.remove('open'); }
-function openLesson(L) { lesson = L; viewCourse = L.course; store.set('lesson', L.id); openItem(L.examples[0]); }
 /* what comes after the current item: next example → essays → quiz → next lesson */
 function nextStep() {
-  const seq = [...lesson.examples, ...lesson.challenges], k = seq.indexOf(item);
-  if (k >= 0 && k < seq.length - 1) {
-    const x = seq[k + 1];
-    return { label: (x.tests ? 'السؤال المقالي التالي: ' : 'المثال التالي: ') + x.title, go: () => openItem(x) };
-  }
-  if (k === seq.length - 1 && lesson.quiz && lesson.quiz.length) return { label: '📝 اختبر نفسك في هذا الدرس', go: () => startQuiz(lesson) };
-  const nx = LESSONS[LESSONS.indexOf(lesson) + 1];
-  return nx ? { label: 'الدرس التالي: ' + nx.title, go: () => openLesson(nx) } : null;
+  const list = itemsOf(tab), k = list.indexOf(item), L = lesson, nx = LESSONS[LESSONS.indexOf(L) + 1];
+  if (tab === 'ex' && k < list.length - 1) return { label: 'المثال التالي: ' + strip(list[k + 1].title), href: href(L, 'ex', k + 1) };
+  if (tab === 'ch' && k < list.length - 1) return { label: 'السؤال التالي: ' + strip(list[k + 1].title), href: href(L, 'ch', k + 1) };
+  if (tab === 'ex' && L.challenges.length) return { label: 'انتقل إلى الأسئلة المقالية', href: href(L, 'ch', 0) };
+  if (nQuiz(L)) return { label: 'اختبر نفسك في هذا الدرس', href: href(L, 'quiz') };
+  return nx ? { label: 'الدرس التالي: ' + strip(nx.title), href: href(nx) } : null;
 }
-function nextBtn(id) {
+function nextBtn() {
   const n = nextStep();
-  return n ? `<button class="btn main nextb" id="${id}">${bidi(esc(n.label))} ←</button>` : '';
+  return n ? `<a class="btn main nextb" href="${n.href}">${bidi(esc(n.label))} <i>←</i></a>` : '';
 }
-function wireNext(id) { const b = $(id), n = nextStep(); if (b && n) b.onclick = () => { n.go(); window.scrollTo({ top: 0, behavior: 'smooth' }); }; }
-document.addEventListener('toggle', (e) => { if (e.target.classList && e.target.classList.contains('concept-d')) store.set('concept', e.target.open); }, true);
 function openItem(x) {
   item = x;
   const isCh = !!x.tests;
   const saved = store.get('code.' + x.id, null);
   code.value = (isCh && saved) || x.code;
-  $('edTitle').textContent = isCh ? 'سؤال مقالي: ' + x.title : 'مثال: ' + x.title;
-  $('bSol').style.display = x.ref ? '' : 'none';
+  $('edKind').textContent = tab === 'trace' ? 'سؤال تتبّع من الاختبار' : isCh ? 'سؤال مقالي' : 'مثال';
+  $('edTitle').innerHTML = x.title;
   $('task').className = 'task' + (isCh ? ' on' : '');
-  $('task').innerHTML = isCh ? `<b class="t">المطلوب:</b> ${x.task}` : '';
-  $('bCheck').style.display = isCh ? '' : 'none';
+  $('task').innerHTML = isCh ? `<b class="t">المطلوب</b><div>${x.task}</div>` : '';
+  $('checkrow').className = 'checkrow' + (isCh ? ' on' : '');
+  $('bSol').style.display = x.ref ? '' : 'none';
   $('results').className = 'box results';
-  errLine = null; resetRun(); renderLessons(); paint();
+  errLine = null; resetRun(); renderRail(); paint();
   wrap.scrollTop = 0;
 }
 function saveCode() { if (item && item.tests) store.set('code.' + item.id, code.value); }
-$('menuBtn').onclick = () => $('side').classList.toggle('open');
 
 /* ---------------- run session ---------------- */
 let session = null, playTimer = null;
@@ -198,7 +337,8 @@ function renderIdle() {
   lastOut = 0;
   const sv = item && item.id ? store.get('pos.' + item.id, null) : null;
   const canResume = sv && sv.h === hashCode(code.value) && sv.p > 0;
-  $('explain').innerHTML = `${canResume ? `<button class="btn main resume" id="bResume">▶ تابع من حيث توقفت (الخطوة ${sv.p + 1})</button>` : ''}<div class="hint">اضغط <b>«خطوة»</b> لتنفيذ البرنامج سطرًا بسطر مع الشرح، أو <b>«تشغيل تلقائي»</b> لمتابعته وحده، أو <b>«النتيجة مباشرة»</b> لرؤية الناتج فورًا. اسحب <b>شريط الخطوات</b> للانتقال إلى أي مرحلة، أو اضغط <b>رقم سطر</b> للانتقال إلى تنفيذه. يمكنك تعديل الكود في أي وقت.</div>`;
+  $('explain').innerHTML = `${canResume ? `<button class="btn main resume" id="bResume">▶ تابع من حيث توقفت · الخطوة ${sv.p + 1}</button>` : ''}<div class="hint"><p>اضغط <b>خطوة</b> لتنفيذ البرنامج سطرًا بسطر، وسيظهر هنا شرح كل خطوة. يمكنك تعديل الكود في أي وقت.</p>
+    <ul class="keys"><li><kbd>←</kbd> خطوة</li><li><kbd>→</kbd> رجوع</li><li><kbd>مسافة</kbd> تشغيل تلقائي</li><li><kbd dir="ltr">Ctrl+Enter</kbd> النتيجة مباشرة</li><li>اضغط <b>رقم السطر</b> للانتقال إلى تنفيذه</li></ul></div>`;
   if (canResume) $('bResume').onclick = () => resumeTo(sv);
   if (typeof updTimeline === 'function') updTimeline();
   $('mem').innerHTML = '<div class="empty">لا توجد متغيرات بعد</div>';
@@ -396,7 +536,7 @@ function render() {
   const total = isEnd ? ' · انتهى البرنامج' : '';
   let html = `<div class="stepno"><span>الخطوة <b class="sn">${S.pos + 1}</b>${total}</span><span>${ev.line ? 'السطر ' + ev.line : ''}</span></div><div class="msg">${ev.msg}</div>`;
   if (isEnd) {
-    html += `<div class="fin">✓ انتهى تنفيذ البرنامج في ${S.hist.length} خطوة${item && !item.tests ? nextBtn('bNextFin') : ''}</div>`;
+    html += `<div class="fin">✓ انتهى تنفيذ البرنامج في ${S.hist.length} خطوة${item && !item.tests && tab === 'ex' ? nextBtn() : ''}</div>`;
   }
   if (ev.cond) html += `<div class="pill ${ev.cond.ok ? 'yes' : 'no'}">${esc(ev.cond.text)}<span>${ev.cond.ok ? 'صح' : 'خطأ'}</span></div>`;
   if (ev.warn) html += ev.warn.map((w) => `<div class="warn">${w}</div>`).join('');
@@ -408,7 +548,7 @@ function render() {
   $('explain').innerHTML = html;
   if ($('hopP')) { $('hopP').onclick = () => hopLine(-1); $('hopN').onclick = () => hopLine(1); }
   updTimeline(); savePos();
-  if (isEnd) { wireNext('bNextFin'); if (item && !item.tests) markSeen(); }
+  if (isEnd && item && !item.tests) markSeen();
   renderMem(h.snap.frames, h.snap.heap, h.snap.structures);
   renderTrace(h.snap.loop);
   renderConsole(h.tr, S.pos === S.hist.length - 1 && !S.finished);
@@ -498,7 +638,7 @@ function delay() { return 1700 - (+$('speed').value) * 150; }
 function play() {
   if (!session && !begin()) return;
   session.autoplay = true;
-  $('bPlay').textContent = '⏸ إيقاف';
+  $('bPlay').innerHTML = '⏸ <span>إيقاف</span>';
   const tick = () => {
     const ok = forward();
     if (!ok) { stopPlay(session && session.waiting ? 'wait' : null); return; }
@@ -510,7 +650,7 @@ function stopPlay(reason) {
   if (playTimer) clearTimeout(playTimer);
   playTimer = null;
   if (session && reason !== 'wait') session.autoplay = false;
-  $('bPlay').textContent = '▶ تشغيل تلقائي';
+  $('bPlay').innerHTML = '▶ <span>تلقائي</span>';
 }
 function runRest() {
   const S = session;
@@ -530,7 +670,7 @@ $('bPlay').onclick = () => (playTimer ? stopPlay() : play());
 $('bRun').onclick = runAllNow;
 $('bReset').onclick = () => { if (item && item.id) store.set('pos.' + item.id, null); errLine = null; resetRun(); paint(); };
 document.addEventListener('keydown', (e) => {
-  if (Q || document.activeElement === code || /^(INPUT|TEXTAREA)$/.test((document.activeElement || {}).tagName)) return;
+  if (Q || $('work').hidden || document.activeElement === code || /^(INPUT|TEXTAREA)$/.test((document.activeElement || {}).tagName)) return;
   if (e.key === 'ArrowLeft' || e.key === 'F10') { e.preventDefault(); stopPlay(); forward(); }
   if (e.key === 'ArrowRight') { e.preventDefault(); back(); }
   if (e.key === 'Home') { e.preventDefault(); $('bFirst').click(); }
@@ -586,20 +726,19 @@ $('bCheck').onclick = () => {
   const all = pass === item.tests.length;
   if (all) {
     const first = !solved[item.id];
-    solved[item.id] = true; store.set('solved', solved); renderLessons();
+    solved[item.id] = true; store.set('solved', solved); refreshProgress();
     confetti();
-    toast(first ? '🎉 أحسنت! حللت السؤال' : '✓ الحل ما زال صحيحًا');
+    toast(first ? '✓ أحسنت! حللت السؤال' : '✓ الحل ما زال صحيحًا');
   }
   $('results').className = 'box results on';
-  $('results').innerHTML = `<div class="sum ${all ? 'ok' : 'bad'}">${all ? 'أحسنت! نجح الحل في كل الاختبارات' : `نجح ${pass} من ${item.tests.length} اختبارات. راجع الاختبارات التي لم تنجح`}</div>${all ? nextBtn('bNextCh') : ''}${rows.join('')}`;
-  if (all) wireNext('bNextCh');
+  $('results').innerHTML = `<div class="sum ${all ? 'ok' : 'bad'}">${all ? 'أحسنت! نجح الحل في كل الاختبارات' : `نجح ${pass} من ${item.tests.length} اختبارات. راجع الاختبارات التي لم تنجح`}</div>${all ? nextBtn() : ''}${rows.join('')}`;
   $('results').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 };
 
 $('bSol').onclick = () => {
   if (!item || !item.ref) return;
   $('results').className = 'box results on';
-  $('results').innerHTML = `<div class="sum">💡 الحل النموذجي <small>(حاول بنفسك أولًا، فهناك أكثر من حل صحيح)</small></div>
+  $('results').innerHTML = `<div class="sum">الحل النموذجي <small>(حاول بنفسك أولًا، فهناك أكثر من حل صحيح)</small></div>
     <pre class="solcode">${colorize(item.ref)}</pre><button class="btn" id="bUseSol">انسخه إلى المحرر</button>`;
   $('bUseSol').onclick = () => { code.value = item.ref; errLine = null; resetRun(); paint(); saveCode(); };
 };
@@ -623,7 +762,7 @@ function closeQuiz() { const m = $('quiz'); if (m) m.classList.remove('on'); Q =
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && Q) closeQuiz(); });
 function quizRender() {
   const { L, i } = Q, n = Q.items.length, m = $('quiz');
-  const head = `<div class="qh"><b>📝 اختبر نفسك · ${bidi(L.title)}</b><button class="qx" title="إغلاق">✕</button></div>
+  const head = `<div class="qh"><b>اختبر نفسك · ${bidi(L.title)}</b><button class="qx" title="إغلاق">✕</button></div>
     <div class="qbar"><i style="width:${100 * i / n}%"></i></div>`;
   if (i >= n) {
     const pc = Q.score / n, prev = quizBest(L);
@@ -635,9 +774,9 @@ function quizRender() {
       ${L.quiz.length > n ? `<p class="dim">في كل محاولة تظهر ${n} أسئلة مختلفة من بنك فيه ${L.quiz.length} سؤالًا.</p>` : ''}
       <div class="qact">${pc >= .5 ? '' : '<button class="btn main" id="qAgain">⟲ محاولة جديدة</button>'}${nx ? `<button class="btn ${pc >= .5 ? 'main' : ''}" id="qNextL">الدرس التالي: ${bidi(esc(nx.title))} ←</button>` : ''}${pc >= .5 ? '<button class="btn" id="qAgain">⟲ محاولة جديدة</button>' : ''}<button class="btn" id="qClose">إغلاق</button></div></div></div>`;
     $('qAgain').onclick = () => startQuiz(L); $('qClose').onclick = closeQuiz;
-    if ($('qNextL')) $('qNextL').onclick = () => { closeQuiz(); openLesson(nx); };
+    if ($('qNextL')) $('qNextL').onclick = () => { closeQuiz(); go(href(nx)); };
     m.querySelector('.qx').onclick = closeQuiz;
-    renderLessons();
+    refreshProgress(); if (tab === 'quiz') renderQuizPane();
     return;
   }
   const x = Q.items[i];
@@ -682,8 +821,8 @@ function quizRender() {
       $('qCheck').disabled = true; $('qAns').readOnly = true;
       done(ok, `<div>الناتج الصحيح:</div><pre class="qout">${esc(r.output)}</pre><button class="btn" id="qTrace">▶ تتبّعه خطوة بخطوة في المختبر</button>`);
       $('qTrace').onclick = () => {
-        closeQuiz();
-        openItem({ id: 'quiz-' + L.id + '-' + i, title: 'سؤال تتبع من الاختبار', code: x.code, input: x.input });
+        traceItem = { id: 'quiz-' + L.id + '-' + i, title: 'تتبّع ناتج البرنامج', code: x.code, input: x.input };
+        closeQuiz(); go(href(L, 'trace'));
       };
     };
     $('qAns').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) $('qCheck').click(); });
@@ -692,6 +831,6 @@ function quizRender() {
 }
 
 /* ---------------- start ---------------- */
-const startId = store.get('lesson', LESSONS[0].id);
-openLesson(LESSONS.find((L) => L.id === startId) || LESSONS[0]);
+window.addEventListener('hashchange', route);
+route();
 })();
