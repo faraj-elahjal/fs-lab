@@ -6,7 +6,7 @@ const ind = (b, n) => b.replace(/^/gm, ' '.repeat(n)).replace(/^\s+$/gm, '');
 const J = (classes, body, imp) => `${imp ? imp + '\n\n' : ''}${classes ? classes.trim() + '\n\n' : ''}public class Main {\n    public static void main(String[] args) {\n${ind(body.trim(), 8)}\n    }\n}\n`;
 const SC = 'import java.util.Scanner;';
 const AL = 'import java.util.ArrayList;';
-const L = (o) => Object.assign({ course: 'البرمجة الشيئية OOP', lang: 'java', challenges: [] }, o);
+const L = (o) => Object.assign({ course: 'البرمجة الشيئية OOP', lang: 'java', variant: 'java', challenges: [] }, o);
 
 window.FS_LESSONS.push(
 L({

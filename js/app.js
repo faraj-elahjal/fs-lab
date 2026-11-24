@@ -89,7 +89,7 @@ const COURSE_INFO = {
   'برمجة 1': { sub: 'المتغيرات، والعمليات الحسابية، والشروط، والحلقات، والمصفوفات الأحادية.', c: '#2dd4bf' },
   'برمجة 2': { sub: 'الدوال، والمصفوفات الأحادية والثنائية، والنصوص، والمؤشرات، والذاكرة الديناميكية، والسجلات.', c: '#3b82f6' },
   'هياكل البيانات': { sub: 'القوائم المترابطة، والمكدس، والطابور، والاستدعاء الذاتي، والأشجار، والترتيب والبحث.', c: '#f59e42' },
-  'البرمجة الشيئية OOP': { sub: 'بلغة <bdi>Java</bdi>: الكلاسات والكائنات، والتغليف، والوراثة، وتعدد الأشكال، والتجريد، والعلاقات بين الكلاسات، والأنواع العامة <bdi>Generics</bdi>.', c: '#facc15' },
+  'البرمجة الشيئية OOP': { sub: 'بلغة <bdi>C++</bdi> أو <bdi>Java</bdi> حسب اختيارك: الكلاسات والكائنات، والتغليف، والوراثة، وتعدد الأشكال، والتجريد، والعلاقات بين الكلاسات، والقوالب.', c: '#facc15' },
 };
 const cinfo = (c) => COURSE_INFO[c] || { sub: '', c: '#2dd4bf' };
 const QN = 10;                                           // questions per quiz attempt (drawn from the lesson's bank)
@@ -98,7 +98,27 @@ const strip = (s) => String(s).replace(/<[^>]*>/g, '');
 const solvedIn = (L) => L.challenges.filter((c) => solved[c.id]).length;
 const nQuiz = (L) => (L.quiz || []).length;
 const quizBest = (L) => { const b = store.get('quiz.' + L.id, null); return b === null ? null : typeof b === 'number' ? { s: b, n: nQuiz(L) } : b; };
-const lessonsOf = (c) => LESSONS.filter((L) => L.course === c);
+/* the OOP course exists in two languages (variant 'cpp' / 'java'); only the chosen one is shown */
+let oopLang = store.get('oopLang', 'cpp');
+const vis = (L) => !L.variant || L.variant === oopLang;
+const VIS = () => LESSONS.filter(vis);
+const nextL = (L, d) => { const V = VIS(); const i = V.indexOf(L); return i < 0 ? null : V[i + d] || null; };
+const lessonsOf = (c) => LESSONS.filter((L) => L.course === c && vis(L));
+const hasVariants = (c) => LESSONS.some((L) => L.course === c && L.variant);
+function langSwitch(c) {
+  if (!hasVariants(c)) return '';
+  return `<div class="lsw" role="group" aria-label="لغة البرمجة"><span>اللغة:</span>${[['cpp', 'C++'], ['java', 'Java']].map(([k, t]) => `<button data-l="${k}" class="${oopLang === k ? 'on' : ''}" aria-pressed="${oopLang === k}"><bdi dir="ltr">${t}</bdi></button>`).join('')}</div>`;
+}
+function wireLangSwitch(root, onLesson) {
+  root.querySelectorAll('.lsw button').forEach((b) => b.onclick = () => {
+    if (b.dataset.l === oopLang) return;
+    const from = lessonsOf(onLesson ? onLesson.course : '');
+    const k = onLesson ? from.indexOf(onLesson) : -1;
+    oopLang = b.dataset.l; store.set('oopLang', oopLang);
+    if (onLesson) { const to = lessonsOf(onLesson.course); go(href(to[Math.max(0, Math.min(to.length - 1, k))])); }
+    else route();
+  });
+}
 function lessonProg(L) {
   const ex = L.examples.filter((x) => seen[x.id]).length, ch = solvedIn(L), b = quizBest(L);
   const tot = L.examples.length + L.challenges.length + (nQuiz(L) ? 1 : 0);
@@ -125,16 +145,17 @@ const bar = (x, c) => `<div class="bar"><i style="width:${Math.round(100 * x)}%;
 
 /* ---- home ---- */
 function viewHome() {
-  show('vHome'); renderNav('home'); document.title = 'FS_Lab · مختبر البرمجة التفاعلي';
+  show('vHome'); renderNav('home'); document.title = 'FS_Lab · مختبر C++ التفاعلي';
   const lastH = store.get('last', ''), last = parseHash(lastH), lastL = last[0] === 'l' && LESSONS.find((L) => L.id === last[1]);
-  const nQ = LESSONS.reduce((a, L) => a + nQuiz(L), 0), nC = LESSONS.reduce((a, L) => a + L.challenges.length, 0), nE = LESSONS.reduce((a, L) => a + L.examples.length, 0);
+  const V = VIS();
+  const nQ = V.reduce((a, L) => a + nQuiz(L), 0), nC = V.reduce((a, L) => a + L.challenges.length, 0), nE = V.reduce((a, L) => a + L.examples.length, 0);
   const cont = lastL
     ? `<a class="btn main big" href="${lastH}">تابع من حيث توقفت <i>←</i></a>`
     : `<a class="btn main big" href="${href(LESSONS[0])}">ابدأ من الدرس الأول <i>←</i></a>`;
   $('vHome').innerHTML = `
   <section class="hero">
     <div class="hero-t">
-      <span class="eyebrow">مختبر <bdi dir="ltr">C++</bdi> و <bdi dir="ltr">Java</bdi> التفاعلي</span>
+      <span class="eyebrow">مختبر <bdi dir="ltr">C++</bdi> التفاعلي</span>
       <h1>افهم ما يحدث <em>داخل</em> برنامجك، سطرًا بسطر</h1>
       <p>اختر مثالًا أو اكتب برنامجك، ثم نفّذه خطوة بخطوة: ترى قيمة كل متغير في الذاكرة، ونتيجة كل شرط، وجدول تتبّع الحلقات، وما يظهر على الشاشة، مع شرح بالعربية لكل خطوة.</p>
       <div class="cta">${cont}<a class="btn big ghost" href="#/c/0" id="toCourses">تصفّح المواد</a></div>
@@ -150,7 +171,7 @@ function viewHome() {
     </div>
   </section>
   <section class="stats">
-    <div><b>${LESSONS.length}</b><span>درسًا تفاعليًا</span></div>
+    <div><b>${V.length}</b><span>درسًا تفاعليًا</span></div>
     <div><b>${nE}</b><span>مثالًا يُنفَّذ خطوة بخطوة</span></div>
     <div><b>${nC}</b><span>سؤالًا مقاليًا يُصحَّح تلقائيًا</span></div>
     <div><b>${nQ}</b><span>سؤال اختبار ذاتي</span></div>
@@ -187,7 +208,7 @@ function viewCourse(i) {
   $('vCourse').innerHTML = `
   <section class="chead" style="--c:${info.c}">
     <nav class="crumbs"><a href="#/">الرئيسية</a><i>/</i><span>${esc(c)}</span></nav>
-    <h1>${esc(c)}</h1><p>${info.sub}</p>
+    <h1>${esc(c)}</h1><p>${info.sub}</p>${langSwitch(c)}
     <div class="cprog">${bar(p, info.c)}<span>${pct(p)} مكتمل · ${Ls.length} دروس</span></div>
   </section>
   <section class="lgrid">${Ls.map((L, k) => {
@@ -203,13 +224,14 @@ function viewCourse(i) {
       ${bar(g.pc, info.c)}
     </a>`;
   }).join('')}</section>`;
+  wireLangSwitch($('vCourse'));
   window.scrollTo(0, 0);
 }
 
 /* ---- lesson: header + tabs, concept, quiz card, workspace ---- */
 function renderLHead() {
   const L = lesson, i = COURSES.indexOf(L.course), info = cinfo(L.course), Ls = lessonsOf(L.course), k = Ls.indexOf(L);
-  const idx = LESSONS.indexOf(L), prev = LESSONS[idx - 1], next = LESSONS[idx + 1], g = lessonProg(L);
+  const prev = nextL(L, -1), next = nextL(L, 1), g = lessonProg(L);
   const T = [['concept', 'الفكرة', ''], ['ex', 'الأمثلة', `${g.ex}/${L.examples.length}`]];
   if (L.challenges.length) T.push(['ch', 'الأسئلة المقالية', `${g.ch}/${L.challenges.length}`]);
   if (nQuiz(L)) T.push(['quiz', 'اختبر نفسك', g.b ? `${g.b.s}/${g.b.n}` : '']);
@@ -220,8 +242,9 @@ function renderLHead() {
       <nav class="crumbs"><a href="#/">الرئيسية</a><i>/</i><a href="#/c/${i}">${esc(L.course)}</a><i>/</i><span>الدرس ${k + 1} من ${Ls.length}</span></nav>
       <div class="lh-nav">${prev ? `<a class="btn sm ghost" href="${href(prev)}" title="${esc(strip(prev.title))}"><i>→</i> الدرس السابق</a>` : ''}${next ? `<a class="btn sm ghost" href="${href(next)}" title="${esc(strip(next.title))}">الدرس التالي <i>←</i></a>` : ''}</div>
     </div>
-    <div class="lh-title"><h1>${bidi(L.title)}</h1><div class="lprog">${bar(g.pc, info.c)}<span>${pct(g.pc)}</span></div></div>
+    <div class="lh-title"><h1>${bidi(L.title)}</h1>${langSwitch(L.course)}<div class="lprog">${bar(g.pc, info.c)}<span>${pct(g.pc)}</span></div></div>
     <nav class="tabs" role="tablist">${T.map(([t, name, n], j) => `<a role="tab" aria-selected="${t === cur}" class="tab ${t === cur ? 'on' : ''}" href="${href(L, t)}"><b>${j + 1}</b><span>${name}</span>${n ? `<span class="cnt"><bdi dir="ltr">${n}</bdi></span>` : ''}</a>`).join('')}</nav>`;
+  wireLangSwitch($('lhead'), L);
 }
 function renderConcept() {
   const L = lesson, n = L.examples.length;
@@ -229,7 +252,7 @@ function renderConcept() {
     <div class="next-cta"><a class="btn main big" href="${href(L, 'ex', 0)}">نفّذ الأمثلة خطوة بخطوة <i>←</i></a><span>${n} ${n > 10 ? 'مثالًا' : 'أمثلة'} جاهزة في هذا الدرس</span></div>`;
 }
 function renderQuizPane() {
-  const L = lesson, nq = nQuiz(L), b = quizBest(L), nx = LESSONS[LESSONS.indexOf(L) + 1];
+  const L = lesson, nq = nQuiz(L), b = quizBest(L), nx = nextL(L, 1);
   $('lQuiz').innerHTML = `<article class="quiz-card">
     <h2>اختبر نفسك في «${bidi(L.title)}»</h2>
     <p>في كل محاولة <b>${Math.min(QN, nq)} أسئلة</b> عشوائية من بنك فيه <b>${nq}</b> سؤالًا: اختيار من متعدد، وأسئلة تتبّع تكتب فيها ناتج البرنامج. تظهر الإجابة الصحيحة وسببها بعد كل سؤال.</p>
@@ -264,6 +287,7 @@ function route() {
   window.scrollTo(0, 0);
 }
 function viewLesson(L, t, k) {
+  if (L.variant && L.variant !== oopLang) { oopLang = L.variant; store.set('oopLang', oopLang); }
   if (!['concept', 'ex', 'ch', 'quiz', 'trace'].includes(t)) t = 'concept';
   if (t === 'ch' && !L.challenges.length) t = 'ex';
   if (t === 'quiz' && !nQuiz(L)) t = 'ex';
@@ -294,7 +318,7 @@ function markSeen() {
 }
 /* what comes after the current item: next example → essays → quiz → next lesson */
 function nextStep() {
-  const list = itemsOf(tab), k = list.indexOf(item), L = lesson, nx = LESSONS[LESSONS.indexOf(L) + 1];
+  const list = itemsOf(tab), k = list.indexOf(item), L = lesson, nx = nextL(L, 1);
   if (tab === 'ex' && k < list.length - 1) return { label: 'المثال التالي: ' + strip(list[k + 1].title), href: href(L, 'ex', k + 1) };
   if (tab === 'ch' && k < list.length - 1) return { label: 'السؤال التالي: ' + strip(list[k + 1].title), href: href(L, 'ch', k + 1) };
   if (tab === 'ex' && L.challenges.length) return { label: 'انتقل إلى الأسئلة المقالية', href: href(L, 'ch', 0) };
@@ -771,7 +795,7 @@ function quizRender() {
     const pc = Q.score / n, prev = quizBest(L);
     if (!prev || pc > prev.s / prev.n) store.set('quiz.' + L.id, { s: Q.score, n });
     if (pc >= .8) confetti();
-    const nx = LESSONS[LESSONS.indexOf(L) + 1];
+    const nx = nextL(L, 1);
     m.innerHTML = `<div class="qcard">${head}<div class="qend"><div class="big">${Q.score} / ${n}</div>
       <p>${pc === 1 ? 'ممتاز! إجابات كاملة 🎉' : pc >= .8 ? 'أحسنت! مستوى ممتاز 👏' : pc >= .5 ? 'جيد، راجع الأسئلة التي أخطأت فيها ثم أعد المحاولة' : 'راجع شرح الدرس والأمثلة خطوة بخطوة، ثم أعد الاختبار'}</p>
       ${L.quiz.length > n ? `<p class="dim">في كل محاولة تظهر ${n} أسئلة مختلفة من بنك فيه ${L.quiz.length} سؤالًا.</p>` : ''}

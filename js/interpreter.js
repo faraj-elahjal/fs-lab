@@ -12,9 +12,10 @@
 (function (G) {
 'use strict';
 
-const PRIMS = new Set(['int', 'double', 'float', 'char', 'bool', 'string', 'long', 'short', 'unsigned', 'auto', 'void']);
+const PRIMS = new Set(['int', 'double', 'float', 'char', 'bool', 'string', 'long', 'short', 'unsigned', 'auto', 'void', 'ostream']);
 const RESERVED = new Set(['if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default', 'break', 'continue', 'return', 'const',
-  'true', 'false', 'cout', 'cin', 'endl', 'using', 'namespace', 'struct', 'new', 'delete', 'nullptr', 'NULL', ...PRIMS]);
+  'true', 'false', 'cout', 'cin', 'endl', 'using', 'namespace', 'struct', 'new', 'delete', 'nullptr', 'NULL', ...PRIMS,
+  'class', 'public', 'private', 'protected', 'virtual', 'this', 'operator', 'template', 'typename', 'friend', 'static', 'override']);
 const MAX_STEPS = 30000;
 const MAX_DEPTH = 400;
 
@@ -48,7 +49,7 @@ const elemBase = (t) => { while (t.k === 'arr') t = t.of; return t; };
 function tokenize(src) {
   const toks = []; let i = 0, line = 1;
   const OPS = ['<<=', '>>=', '<<', '>>', '->', '++', '--', '+=', '-=', '*=', '/=', '%=', '==', '!=', '<=', '>=', '&&', '||', '::',
-    '+', '-', '*', '/', '%', '=', '<', '>', '!', '?', ':', ';', ',', '(', ')', '{', '}', '[', ']', '.', '&'];
+    '+', '-', '*', '/', '%', '=', '<', '>', '!', '?', ':', ';', ',', '(', ')', '{', '}', '[', ']', '.', '&', '~'];
   const push = (t, v, s, e, extra) => toks.push(Object.assign({ t, v, line, s, e }, extra || {}));
   while (i < src.length) {
     const c = src[i];
@@ -123,16 +124,18 @@ function parse(src) {
   };
   const mk = (p0, node) => { node.src = src.slice(toks[p0].s, toks[p - 1].e); if (node.line == null) node.line = toks[p0].line; return node; };
   const warn = (line, msg) => warnings.push({ line, msg });
-  const LV = new Set(['var', 'index', 'member', 'arrow', 'deref']);
+  const LV = new Set(['var', 'index', 'member', 'arrow', 'deref', 'scoped']);
   const isLv = (n) => LV.has(n.k);
+  let tpl = new Set();             // template parameter names of the declaration being parsed (typename T)
+  const skipTplArgs = () => { if (!is('<')) return; let d = 0; do { const t = next(); if (t.v === '<') d++; else if (t.v === '>') d--; else if (t.v === '>>') d -= 2; else if (t.t === 'eof') throw new CppError('القوس < لم يُغلق', t.line); } while (d > 0); };
   const isTypeName = (o = 0) => {
     const t = peek(o);
     if (t.t !== 'id') return false;
-    if (PRIMS.has(t.v) || structs.has(t.v)) return true;
+    if (PRIMS.has(t.v) || structs.has(t.v) || tpl.has(t.v)) return true;
     if (t.v === 'struct' && peek(o + 1).t === 'id' && structs.has(peek(o + 1).v)) return true;
     return false;
   };
-  const isTypeStart = () => is('const') ? isTypeName(1) : isTypeName(0);
+  const isTypeStart = () => is('const') ? isTypeName(1) : isTypeName(0) && !is('::', 1);
 
   // ---- expressions ----
   function parseExpr() { return parseAssign(); }
@@ -225,10 +228,11 @@ function parse(src) {
     }
   }
   function parseTypeOnly() {                 // type used in casts and new: base + stars
-    if (is('struct')) next();
+    if (is('struct') || is('class')) next();
     const t = next();
     let base;
-    if (structs.has(t.v)) base = TSt(t.v);
+    if (tpl.has(t.v)) base = TP('auto');
+    else if (structs.has(t.v)) { base = TSt(t.v); skipTplArgs(); }
     else if (PRIMS.has(t.v)) base = TP(normPrim(t.v));
     else throw new CppError(`النوع ${C(t.v)} غير معروف`, t.line);
     while (is('*')) { next(); base = TPtr(base); }
@@ -251,11 +255,43 @@ function parse(src) {
       if (t.v === 'string' && is('::') && peek(1).v === 'npos') { next(); next(); return mk(p0, { k: 'num', v: -1 }); }
       if (t.v === 'new') {
         const ty = parseTypeOnly();
-        let n = null, zero = false, init = null;
+        let n = null, zero = false, init = null, args = null;
         if (is('[')) { next(); n = parseExpr(); expect(']'); }
-        if (is('(')) { next(); if (!is(')')) init = parseAssign(); expect(')'); zero = true; }
-        else if (is('{')) { init = parseInitList(); zero = true; }
-        return mk(p0, { k: 'new', type: ty, n, zero, init });
+        if (is('(')) {
+          next(); const list = [];
+          if (!is(')')) { do { list.push(parseAssign()); } while (is(',') && next()); }
+          expect(')');
+          if (ty.k === 'struct' && !n) args = list;
+          else { if (list.length > 1) throw new CppError('قيمة واحدة فقط بين القوسين مع new', t.line); init = list[0] || null; zero = true; }
+        } else if (is('{')) { init = parseInitList(); zero = true; }
+        return mk(p0, { k: 'new', type: ty, n, zero, init, args });
+      }
+      if (t.v === 'this') return mk(p0, { k: 'this' });
+      if (t.v === 'string' && is('(')) { next(); const e = is(')') ? { k: 'str', v: '' } : parseAssign(); expect(')'); return mk(p0, { k: 'cast', type: TP('string'), e }); }
+      if (t.v === 'dynamic_cast') {
+        expect('<'); const ty = parseTypeOnly(); expect('>'); expect('(');
+        const e = parseExpr(); expect(')');
+        return mk(p0, { k: 'dyncast', type: ty, e });
+      }
+      if (structs.has(t.v) && is('::')) {
+        next();
+        const nm = is('operator') ? (next(), opName()) : next().v;
+        if (is('(')) {
+          next(); const args = [];
+          if (!is(')')) { do { args.push(parseAssign()); } while (is(',') && next()); }
+          expect(')');
+          return mk(p0, { k: 'call', name: nm, cls: t.v, args });
+        }
+        return mk(p0, { k: 'scoped', cls: t.v, name: nm });
+      }
+      if (structs.has(t.v) && (is('(') || is('<'))) {
+        skipTplArgs();
+        if (is('(')) {
+          next(); const args = [];
+          if (!is(')')) { do { args.push(parseAssign()); } while (is(',') && next()); }
+          expect(')');
+          return mk(p0, { k: 'construct', type: TSt(t.v), args });
+        }
       }
       if (t.v === 'static_cast') {
         expect('<'); const ty = parseTypeOnly(); expect('>'); expect('(');
@@ -290,10 +326,11 @@ function parse(src) {
   function parseBase() {
     let isConst = false;
     if (is('const')) { next(); isConst = true; }
-    if (is('struct')) next();
+    if (is('struct') || is('class')) next();
     const t = next();
     let base;
-    if (t.t === 'id' && structs.has(t.v)) base = TSt(t.v);
+    if (t.t === 'id' && tpl.has(t.v)) base = TP('auto');
+    else if (t.t === 'id' && structs.has(t.v)) { base = TSt(t.v); skipTplArgs(); }
     else if (t.t === 'id' && PRIMS.has(t.v)) {
       let name = t.v;
       while (peek().t === 'id' && ['long', 'int', 'short'].includes(peek().v) && ['long', 'unsigned', 'short'].includes(name)) next();
@@ -312,11 +349,24 @@ function parse(src) {
     }
     return dims;
   }
-  function parseDeclarator(base) {          // stars, &, name, dims
+  function opName() {
+    if (is('(') && is(')', 1)) { next(); next(); return 'operator()'; }
+    if (is('[') && is(']', 1)) { next(); next(); return 'operator[]'; }
+    const t = next();
+    if (t.t !== 'op') throw new CppError(`متوقع عامل بعد ${C('operator')}، مثل ${C('operator+')}`, t.line);
+    return 'operator' + t.v;
+  }
+  function parseDeclarator(base) {          // stars, &, name (or operator+, or Class::member), dims
     let type = base, ref = false;
     while (is('*')) { next(); type = TPtr(type); }
     if (is('&')) { next(); ref = true; }
+    if (is('operator')) { const t0 = next(); return { type, ref, id: { t: 'id', v: opName(), line: t0.line } }; }
     const id = next();
+    if (id.t === 'id' && structs.has(id.v) && is('::')) {
+      next();
+      const nm = is('operator') ? (next(), opName()) : next().v;
+      return { type, ref, id: { t: 'id', v: nm, line: id.line }, cls: id.v };
+    }
     return { type, ref, id };
   }
   function parseDeclRest(p0, bt, first, inFor) {
@@ -328,14 +378,20 @@ function parse(src) {
       if (RESERVED.has(id.v)) throw new CppError(`لا يمكن استخدام الكلمة المحجوزة ${C(id.v)} اسمًا لمتغير`, id.line);
       if (d.type.k === 'void') throw new CppError('لا يمكن تعريف متغير من النوع void', id.line);
       const dims = parseDims();
-      let init = null;
-      if (is('=')) { next(); init = is('{') ? parseInitList() : parseAssign(); }
+      let init = null, ctorArgs = null;
+      if (is('(') && d.type.k === 'struct' && !d.ref) {
+        const o = next();
+        if (is(')')) throw new CppError(`${C(tstr(d.type) + ' ' + id.v + '();')} لا تنشئ كائنًا، بل تعرّف دالة (most vexing parse). لاستدعاء الـ constructor بدون قيم اكتب ${C(tstr(d.type) + ' ' + id.v + ';')}`, o.line);
+        ctorArgs = [];
+        do { ctorArgs.push(parseAssign()); } while (is(',') && next());
+        expect(')', `القوس ${C('(')} بعد اسم الكائن لم يُغلق`);
+      } else if (is('=')) { next(); init = is('{') ? parseInitList() : parseAssign(); }
       else if (is('{') && (dims.length || d.type.k === 'struct')) init = parseInitList();
-      else if (bt.isConst) throw new CppError('الثابت const يجب أن يُعطى قيمة عند تعريفه', id.line);
+      else if (bt.isConst && !ctorArgs) throw new CppError('الثابت const يجب أن يُعطى قيمة عند تعريفه', id.line);
       else if (d.ref) throw new CppError(`المرجع ${C('&' + id.v)} يجب أن يُربط بمتغير عند تعريفه، مثل ${C(`int &${id.v} = x;`)}`, id.line);
       if (dims.length && dims.some((x, i) => x === null && (i > 0 || !init))) throw new CppError('يجب تحديد حجم المصفوفة بين القوسين [ ]', id.line);
       if (!dims.length && init && init.k === 'list' && d.type.k !== 'struct') throw new CppError(`القائمة ${C('{ }')} تُستخدم مع المصفوفات والسجلات`, id.line);
-      decls.push({ name: id.v, type: d.type, ref: d.ref, dims, init, line: id.line });
+      decls.push({ name: id.v, type: d.type, ref: d.ref, dims, init, ctorArgs, line: id.line });
       if (!is(',')) break;
       next(); d = parseDeclarator(bt.base);
     }
@@ -346,7 +402,7 @@ function parse(src) {
     const p0 = p;
     const bt = parseBase();
     const d = parseDeclarator(bt.base);
-    if (is('(') && d.id.t === 'id') throw new CppError('لا يمكن تعريف دالة داخل دالة أخرى. اكتبها خارج main', d.id.line);
+    if (is('(') && d.id.t === 'id' && (d.type.k !== 'struct' || d.ref)) throw new CppError('لا يمكن تعريف دالة داخل دالة أخرى. اكتبها خارج main', d.id.line);
     return parseDeclRest(p0, bt, d, inFor);
   }
   function bodyWarn(kw, body, line) {
@@ -449,6 +505,13 @@ function parse(src) {
       expect(';', `نسيت الفاصلة المنقوطة ${C(';')} في نهاية جملة cout`);
       return mk(p0, { k: 'cout', items, line: t.line });
     }
+    if (peek().t === 'id' && peek().v !== 'cout' && is('<<', 1) && !isTypeStart()) {
+      const st = next();
+      const items = [];
+      while (is('<<')) { next(); items.push(parseTernary()); }
+      expect(';', `نسيت الفاصلة المنقوطة ${C(';')} في نهاية السطر`);
+      return mk(p0, { k: 'cout', stream: st.v, items, line: t.line });
+    }
     if (is('cin') && !is('.', 1)) {
       next();
       if (is('<<')) throw new CppError(`${C('cin')} للإدخال وتُستخدم مع ${C('>>')}، أما ${C('<<')} فمع ${C('cout')}`, t.line);
@@ -505,21 +568,138 @@ function parse(src) {
     expect(')', `القوس ${C('(')} بعد اسم الدالة لم يُغلق`);
     return params;
   }
-  function parseStruct() {
+  const sigOf = (params) => params.map((x) => tstr(x.type) + (x.ref ? '&' : '')).join(',');
+  function parseTemplateHead() {           // template <typename T, class U>
+    const t0 = next();
+    expect('<', `بعد ${C('template')} يُكتب ${C('<typename T>')}`);
+    const names = [];
+    do {
+      if (!is('typename') && !is('class')) throw new CppError(`متوقع ${C('typename')} أو ${C('class')} داخل ${C('template < >')}`, t0.line);
+      next(); const id = next();
+      if (id.t !== 'id') throw new CppError('متوقع اسم النوع العام مثل T', t0.line);
+      names.push(id.v);
+    } while (is(',') && next());
+    expect('>');
+    return names;
+  }
+  function parseCtorInit() {               // : a(x), Base(y), b{z}
+    const list = [];
+    next();
+    do {
+      const id = next();
+      if (id.t !== 'id') throw new CppError('متوقع اسم حقل أو كلاس أب في قائمة التهيئة بعد :', id.line);
+      const brace = is('{');
+      expect(brace ? '{' : '(', `بعد ${C(id.v)} في قائمة التهيئة تُكتب القيمة بين قوسين`);
+      const args = [];
+      if (!is(brace ? '}' : ')')) { do { args.push(parseAssign()); } while (is(',') && next()); }
+      expect(brace ? '}' : ')');
+      list.push({ name: id.v, args, line: id.line });
+    } while (is(',') && next());
+    return list;
+  }
+  function parseClass() {
     const kw = next();
     const id = next();
-    if (id.t !== 'id' || RESERVED.has(id.v)) throw new CppError('متوقع اسم السجل بعد struct', kw.line);
-    const def = { name: id.v, fields: [], line: id.line };
-    structs.set(id.v, def);
-    expect('{', `جسم السجل ${C(id.v)} يُكتب بين ${C('{ }')}`);
+    const what = kw.v === 'class' ? 'الكلاس' : 'السجل';
+    if (id.t !== 'id' || RESERVED.has(id.v)) throw new CppError(`متوقع اسم ${what} بعد ${kw.v}`, kw.line);
+    let def = structs.get(id.v);
+    if (def && def.complete) throw new CppError(`${what} ${C(id.v)} معرَّف مسبقًا`, id.line);
+    if (!def) {
+      def = { name: id.v, fields: [], line: id.line, isClass: kw.v === 'class', bases: [], methods: new Map(), ctors: [], dtor: null, statics: [], friends: new Set(), friendClasses: new Set(), complete: false, tpl: [...tpl] };
+      structs.set(id.v, def);
+    }
+    if (is(';')) { next(); return def; }      // forward declaration: class A;
+    def.isClass = kw.v === 'class'; def.line = id.line; def.tpl = [...tpl];
+    if (is('final')) { next(); def.final = true; }
+    if (is(':')) {
+      next();
+      do {
+        let acc = kw.v === 'class' ? 'private' : 'public';
+        if (is('public') || is('protected') || is('private')) acc = next().v;
+        if (is('virtual')) next();
+        const b = next();
+        if (b.v === id.v) throw new CppError(`الكلاس ${C(id.v)} لا يمكن أن يرث من نفسه`, b.line);
+        if (!structs.has(b.v) || !structs.get(b.v).complete) throw new CppError(`الكلاس الأب ${C(b.v)} غير معرَّف قبل ${C(id.v)}. عرّف الكلاس الأب أولًا`, b.line);
+        if (structs.get(b.v).final) throw new CppError(`لا يمكن الوراثة من ${C(b.v)} لأنه ${C('final')}`, b.line);
+        def.bases.push({ name: b.v, access: acc });
+        if (kw.v === 'class' && !/public|protected|private/.test(toks[p - 2].v) && toks[p - 2].v !== 'virtual')
+          warn(b.line, `الوراثة في ${C('class')} بدون كلمة تكون ${C('private')} افتراضيًا، فلا تُرى دوال الأب العامة من خارج الكلاس. هل تقصد ${C('class ' + id.v + ' : public ' + b.v)}؟`);
+      } while (is(',') && next());
+    }
+    expect('{', `جسم ${what} ${C(id.v)} يُكتب بين ${C('{ }')}`);
+    let access = kw.v === 'class' ? 'private' : 'public';
     while (!is('}')) {
-      if (peek().t === 'eof') throw new CppError(`القوس ${C('{')} في struct لم يُغلق`, id.line);
+      if (peek().t === 'eof') throw new CppError(`القوس ${C('{')} في ${what} ${id.v} لم يُغلق`, id.line);
+      if ((is('public') || is('private') || is('protected')) && is(':', 1)) { access = next().v; next(); continue; }
+      if (is(';')) { next(); continue; }
+      if (is('template')) throw new CppError('القوالب داخل الكلاس غير مدعومة في المختبر', peek().line);
+      if (is('friend')) {
+        next();
+        if (is('class')) { next(); def.friendClasses.add(next().v); expect(';'); continue; }
+        const f = parseTopFunction(true);
+        def.friends.add(f);
+        continue;
+      }
+      let virt = false, stat = false;
+      for (;;) {
+        if (is('virtual')) { next(); virt = true; continue; }
+        if (is('static')) { next(); stat = true; continue; }
+        if (is('inline') || is('explicit') || is('constexpr')) { next(); continue; }
+        break;
+      }
+      if (is('~')) {
+        const tl = next(); const nm = next();
+        if (nm.v !== id.v) throw new CppError(`اسم الـ destructor يجب أن يكون ${C('~' + id.v)}`, tl.line);
+        const params = parseParams();
+        if (params.length) throw new CppError('الـ destructor لا يستقبل معاملات', tl.line);
+        let body = null;
+        if (is('{')) body = parseBlock(); else if (is('=')) { next(); next(); expect(';'); body = { k: 'block', body: [], line: tl.line, endLine: tl.line }; } else expect(';');
+        def.dtor = { name: '~' + id.v, params: [], body, line: tl.line, virtual: virt, access, cls: id.v, isDtor: true, ret: TP('void') };
+        continue;
+      }
+      if (peek().t === 'id' && peek().v === id.v && is('(', 1)) {
+        const t0 = next();
+        const params = parseParams();
+        let init = null;
+        if (is(':')) init = parseCtorInit();
+        let body = null;
+        if (is('{')) body = parseBlock();
+        else if (is('=')) { next(); next(); expect(';'); body = { k: 'block', body: [], line: t0.line, endLine: t0.line }; }
+        else expect(';', `نسيت الفاصلة المنقوطة ${C(';')} بعد تعريف الـ constructor`);
+        const sig = sigOf(params);
+        if (def.ctors.some((k) => k.sig === sig)) throw new CppError(`الـ constructor ${C(id.v + '(' + sig + ')')} معرَّف مرتين`, t0.line);
+        def.ctors.push({ name: id.v, params, init, body, line: t0.line, access, isCtor: true, cls: id.v, sig, ret: TP('void') });
+        continue;
+      }
       const bt = parseBase();
       for (;;) {
         const d = parseDeclarator(bt.base);
-        if (d.id.t !== 'id') throw new CppError('متوقع اسم الحقل', d.id.line);
-        if (is('(')) throw new CppError('الدوال داخل struct ليست ضمن المختبر حاليًا. اكتب الدالة خارج السجل', d.id.line);
-        if (d.type.k === 'struct' && d.type.name === id.v) throw new CppError(`السجل ${C(id.v)} لا يمكن أن يحتوي على نفسه. استخدم مؤشرًا ${C(id.v + '* next;')}`, d.id.line);
+        if (d.id.t !== 'id') throw new CppError('متوقع اسم الحقل أو الدالة', d.id.line);
+        if (is('(')) {
+          const params = parseParams();
+          let constM = false, override = false, fin = false;
+          for (;;) {
+            if (is('const')) { next(); constM = true; continue; }
+            if (is('override')) { next(); override = true; continue; }
+            if (is('final')) { next(); fin = true; continue; }
+            break;
+          }
+          let body = null, pure = false;
+          if (is('=')) {
+            next(); const z = next();
+            if (z.v !== '0') throw new CppError(`الدالة المجردة تُكتب ${C('= 0;')}`, z.line);
+            if (!virt) throw new CppError(`الدالة المجردة (pure virtual) يجب أن تكون ${C('virtual')}: ${C('virtual ' + tstr(d.type) + ' ' + d.id.v + '() = 0;')}`, z.line);
+            pure = true; expect(';');
+          } else if (is('{')) body = parseBlock();
+          else expect(';', `نسيت الفاصلة المنقوطة ${C(';')} بعد تعريف الدالة`);
+          const m = { name: d.id.v, ret: d.type, retRef: d.ref, params, body, line: d.id.line, access, virtual: virt, static: stat, constM, pure, override, final: fin, cls: id.v, sig: sigOf(params) };
+          const list = def.methods.get(m.name) || [];
+          const dup = list.find((x) => x.sig === m.sig);
+          if (dup) throw new CppError(sameT(dup.ret, m.ret) ? `الدالة ${C(m.name)} معرَّفة مرتين بالمعاملات نفسها` : `لا يكفي اختلاف نوع الإرجاع لتعريف دالة ثانية باسم ${C(m.name)}؛ الـ overloading يحتاج اختلافًا في المعاملات (العدد أو النوع)`, m.line);
+          list.push(m); def.methods.set(m.name, list);
+          break;
+        }
+        if (d.type.k === 'struct' && d.type.name === id.v) throw new CppError(`${what} ${C(id.v)} لا يمكن أن يحتوي على نفسه. استخدم مؤشرًا ${C(id.v + '* next;')}`, d.id.line);
         const dims = parseDims();
         let type = d.type;
         for (let i = dims.length - 1; i >= 0; i--) {
@@ -528,17 +708,94 @@ function parse(src) {
         }
         let init = null;
         if (is('=')) { next(); init = parseTernary(); }
-        if (def.fields.some((f) => f.name === d.id.v)) throw new CppError(`الحقل ${C(d.id.v)} مكرر في السجل`, d.id.line);
-        def.fields.push({ name: d.id.v, type, init, line: d.id.line });
-        if (!is(',')) break;
+        const f = { name: d.id.v, type, init, line: d.id.line, access, isConst: bt.isConst, owner: id.v };
+        if (stat) def.statics.push(f);
+        else {
+          if (def.fields.some((x) => x.name === d.id.v)) throw new CppError(`الحقل ${C(d.id.v)} مكرر`, d.id.line);
+          def.fields.push(f);
+        }
+        if (!is(',')) { expect(';', `نسيت الفاصلة المنقوطة ${C(';')} بعد الحقل`); break; }
         next();
       }
-      expect(';', `نسيت الفاصلة المنقوطة ${C(';')} بعد الحقل`);
     }
     next();
-    expect(';', `تعريف ${C('struct')} ينتهي بفاصلة منقوطة ${C(';')} بعد القوس ${C('}')}`);
+    expect(';', `تعريف ${C(kw.v)} ينتهي بفاصلة منقوطة ${C(';')} بعد القوس ${C('}')}`);
+    def.complete = true;
     return def;
   }
+  // out-of-class constructor / destructor: A::A(...) : init { }   A::~A() { }
+  function parseOutCtor() {
+    const cn = next(); next();
+    let dtor = false;
+    if (is('~')) { next(); dtor = true; }
+    const nm = next();
+    if (nm.v !== cn.v) throw new CppError(`متوقع ${C(cn.v + '::' + (dtor ? '~' : '') + cn.v)}`, nm.line);
+    const params = parseParams();
+    let init = null;
+    if (!dtor && is(':')) init = parseCtorInit();
+    const body = parseBlock();
+    const def = structs.get(cn.v);
+    if (dtor) {
+      if (!def.dtor) throw new CppError(`الـ destructor ${C('~' + cn.v)} غير مُعلَن داخل الكلاس`, cn.line);
+      def.dtor.body = body; def.dtor.line = cn.line;
+      return;
+    }
+    const k = def.ctors.find((x) => x.sig === sigOf(params));
+    if (!k) throw new CppError(`الـ constructor ${C(cn.v + '(' + sigOf(params) + ')')} غير مُعلَن داخل الكلاس ${C(cn.v)}. أضف نموذجه داخل الكلاس أولًا`, cn.line);
+    if (k.body) throw new CppError(`الـ constructor ${C(cn.v + '(' + sigOf(params) + ')')} معرَّف مرتين`, cn.line);
+    k.body = body; k.init = init; k.line = cn.line;
+    params.forEach((x, i) => { if (k.params[i]) k.params[i].name = x.name; });
+  }
+  // functions at file level (also friend functions inside a class); returns the function name
+  function parseTopFunction(inClass) {
+    const bt = parseBase();
+    const d = parseDeclarator(bt.base);
+    if (!is('(')) throw new CppError('متوقع دالة بعد friend', d.id.line);
+    registerFunc(d, inClass);
+    return d.id.v;
+  }
+  function registerFunc(d, inClass) {
+    const id = d.id;
+    if (id.v === 'main' && tstr(d.type) !== 'int') throw new CppError(`الدالة main تُكتب ${C('int main()')}`, id.line);
+    const params = parseParams();
+    if (d.cls) {                          // Type Class::method(...) [const] { }
+      const def = structs.get(d.cls);
+      let constM = false;
+      if (is('const')) { next(); constM = true; }
+      const body = parseBlock();
+      const m = (def.methods.get(id.v) || []).find((x) => x.sig === sigOf(params));
+      if (!m) throw new CppError(`الدالة ${C(d.cls + '::' + id.v + '(' + sigOf(params) + ')')} غير مُعلَنة داخل الكلاس ${C(d.cls)}. أضف نموذجها داخل الكلاس أولًا`, id.line);
+      if (m.body) throw new CppError(`الدالة ${C(d.cls + '::' + id.v)} معرَّفة مرتين`, id.line);
+      if (m.constM !== constM) throw new CppError(`الدالة ${C(d.cls + '::' + id.v)} يجب أن تطابق النموذج في ${C('const')}`, id.line);
+      m.body = body; m.line = id.line;
+      params.forEach((x, i) => { if (m.params[i]) m.params[i].name = x.name; });
+      return;
+    }
+    const sig = sigOf(params);
+    const list = funcs.get(id.v) || [];
+    let f = list.find((x) => x.sig === sig);
+    const ret = d.type;
+    if (is(';')) {
+      next();
+      if (!f) { f = { name: id.v, ret, params, sig, line: id.line, body: null, tpl: [...tpl] }; list.push(f); funcs.set(id.v, list); }
+      return;
+    }
+    const body = parseBlock();
+    if (f && f.body) throw new CppError(`الدالة ${C(id.v)} معرَّفة مسبقًا بالمعاملات نفسها`, id.line);
+    if (f) {
+      if (!sameT(f.ret, ret)) throw new CppError(`نوع الإرجاع لا يطابق النموذج الأولي للدالة ${C(id.v)}`, id.line);
+      if (params.some((x) => x.def) && f.params.some((x) => x.def)) throw new CppError('القيمة الافتراضية تُكتب في النموذج الأولي فقط، وليس مرة ثانية في التعريف', id.line);
+      if (!f.params.some((x) => x.def)) f.params = params; else f.params.forEach((x, i) => { x.name = params[i].name; });
+      f.body = body; f.line = id.line;
+    } else {
+      if (list.some((x) => x.params.length === params.length && x.params.every((q, i) => sameT(q.type, params[i].type))))
+        throw new CppError(`لا يكفي اختلاف نوع الإرجاع أو & لتعريف دالة ثانية باسم ${C(id.v)}؛ يجب أن تختلف المعاملات في العدد أو النوع`, id.line);
+      list.push({ name: id.v, ret, params, sig, line: id.line, body, tpl: [...tpl] });
+      funcs.set(id.v, list);
+    }
+  }
+  const isClassStart = () => (is('struct') || is('class')) && peek(1).t === 'id' && (is('{', 2) || is(':', 2) || is(';', 2) || is('final', 2));
+  const isOutCtor = () => peek().t === 'id' && structs.has(peek().v) && is('::', 1) && (peek(2).v === peek().v || peek(2).v === '~');
 
   // ---- program ----
   const funcs = new Map();
@@ -550,7 +807,7 @@ function parse(src) {
   if (!hasMain) {
     const stmts = [];
     while (peek().t !== 'eof') {
-      if (is('struct') && peek(1).t === 'id' && is('{', 2)) { parseStruct(); continue; }
+      if (isClassStart()) { parseClass(); continue; }
       if (isTypeStart() && peek(1).t === 'id' && is('(', 2)) throw new CppError(`البرنامج يحتوي على دوال ولا يحتوي على ${C('int main()')}`, peek().line);
       stmts.push(parseStmt());
     }
@@ -559,47 +816,100 @@ function parse(src) {
     while (peek().t !== 'eof') {
       while (peek().t === 'pp') next();
       if (peek().t === 'eof') break;
-      if (is('struct') && peek(1).t === 'id' && (is('{', 2))) { parseStruct(); continue; }
+      tpl = new Set();
+      if (is('template')) { tpl = new Set(parseTemplateHead()); }
+      if (isClassStart()) { parseClass(); continue; }
       if (is('using')) { next(); while (!is(';')) next(); next(); continue; }
-      if (!isTypeStart()) throw new CppError('خارج الدوال يُسمح فقط بتعريف دوال أو سجلات struct أو متغيرات عامة', peek().line);
+      if (isOutCtor()) { parseOutCtor(); continue; }
+      if (!isTypeStart()) throw new CppError('خارج الدوال يُسمح فقط بتعريف دوال أو كلاسات أو سجلات struct أو متغيرات عامة', peek().line);
       const p0 = p;
       const bt = parseBase();
       const d = parseDeclarator(bt.base);
       const id = d.id;
       if (id.t !== 'id') throw new CppError('متوقع اسم بعد النوع', id.line);
-      if (is('(')) {
-        if (id.v === 'main' && tstr(d.type) !== 'int') throw new CppError(`الدالة main تُكتب ${C('int main()')}`, id.line);
-        const params = parseParams();
-        const sig = params.map((x) => tstr(x.type) + (x.ref ? '&' : '')).join(',');
-        const list = funcs.get(id.v) || [];
-        let f = list.find((x) => x.sig === sig);
-        const ret = d.type;
-        if (is(';')) {
-          next();
-          if (!f) { f = { name: id.v, ret, params, sig, line: id.line, body: null }; list.push(f); funcs.set(id.v, list); }
-          continue;
-        }
-        const body = parseBlock();
-        if (f && f.body) throw new CppError(`الدالة ${C(id.v)} معرَّفة مسبقًا بالمعاملات نفسها`, id.line);
-        if (f) {
-          if (!sameT(f.ret, ret)) throw new CppError(`نوع الإرجاع لا يطابق النموذج الأولي للدالة ${C(id.v)}`, id.line);
-          if (params.some((x) => x.def) && f.params.some((x) => x.def)) throw new CppError('القيمة الافتراضية تُكتب في النموذج الأولي فقط، وليس مرة ثانية في التعريف', id.line);
-          if (!f.params.some((x) => x.def)) f.params = params; else f.params.forEach((x, i) => { x.name = params[i].name; });
-          f.body = body; f.line = id.line;
-        } else {
-          if (list.some((x) => x.params.length === params.length && x.params.every((q, i) => sameT(q.type, params[i].type))))
-            throw new CppError(`لا يكفي اختلاف نوع الإرجاع أو & لتعريف دالة ثانية باسم ${C(id.v)}؛ يجب أن تختلف المعاملات في العدد أو النوع`, id.line);
-          list.push({ name: id.v, ret, params, sig, line: id.line, body });
-          funcs.set(id.v, list);
-        }
+      if (is('(')) { registerFunc(d, false); continue; }
+      if (d.cls) {                          // int Counter::count = 0;
+        const def = structs.get(d.cls);
+        const st = def.statics.find((x) => x.name === id.v);
+        if (!st) throw new CppError(`${C(d.cls + '::' + id.v)} ليس عضوًا ثابتًا static في الكلاس ${C(d.cls)}`, id.line);
+        d.id = { t: 'id', v: d.cls + '::' + id.v, line: id.line };
+        const g = parseDeclRest(p0, bt, d, false);
+        st.defined = true;
+        globals.push(g);
         continue;
       }
       globals.push(parseDeclRest(p0, bt, d, false));
     }
+    tpl = new Set();
     if (!funcs.has('main')) throw new CppError(`البرنامج يجب أن يحتوي على الدالة ${C('int main()')}`, 1);
     for (const [name, list] of funcs) for (const f of list) if (!f.body) throw new CppError(`الدالة ${C(name)} لها نموذج أولي (prototype) لكن لا يوجد تعريف لها`, f.line);
   }
+  linkClasses(structs, globals);
   return { funcs, globals, snippet, warnings, structs };
+}
+
+/* ======================= classes: inheritance, virtual, abstract, statics ======================= */
+function findImplIn(structs, def, name, sig) {            // most-derived implementation of name(sig)
+  const own = (def.methods.get(name) || []).find((x) => x.sig === sig);
+  if (own) return own;
+  for (const b of def.bases) { const r = findImplIn(structs, structs.get(b.name), name, sig); if (r) return r; }
+  return null;
+}
+function linkClasses(structs, globals) {
+  const done = new Set();
+  const baseVirtual = (def, m) => {
+    for (const b of def.bases) {
+      const bd = structs.get(b.name);
+      const bm = (bd.methods.get(m.name) || []).find((x) => x.sig === m.sig);
+      if (bm && (bm.isVirtual || bm.virtual)) return bm;
+      const r = baseVirtual(bd, m); if (r) return r;
+    }
+    return null;
+  };
+  const baseDtorVirtual = (def) => def.bases.some((b) => { const bd = structs.get(b.name); return (bd.dtor && bd.dtor.isVirtual) || baseDtorVirtual(bd); });
+  const link = (def) => {
+    if (done.has(def)) return;
+    done.add(def);
+    if (!def.complete) throw new CppError(`الكلاس ${C(def.name)} مُعلَن ولم يُعرَّف جسمه`, def.line);
+    def.bases.forEach((b) => link(structs.get(b.name)));
+    const all = [];
+    for (const b of def.bases) for (const f of structs.get(b.name).allFields) all.push(f);
+    for (const f of def.fields) all.push(Object.assign(f, { owner: def.name }));
+    def.allFields = all;
+    for (const list of def.methods.values()) for (const m of list) {
+      const bm = baseVirtual(def, m);
+      if (bm) {
+        if (bm.final) throw new CppError(`لا يمكن إعادة تعريف الدالة ${C(m.name)} لأنها ${C('final')} في الكلاس ${C(bm.cls)}`, m.line);
+        m.isVirtual = true; m.overrides = bm;
+      } else {
+        m.isVirtual = !!m.virtual;
+        if (m.override) throw new CppError(`الدالة ${C(m.name)} مكتوب بعدها ${C('override')} لكنها لا تعيد تعريف دالة ${C('virtual')} في الكلاس الأب. تأكد من الاسم والمعاملات، أو اجعل دالة الأب virtual`, m.line);
+      }
+    }
+    if (def.dtor) def.dtor.isVirtual = !!def.dtor.virtual || baseDtorVirtual(def);
+    const left = [], seen = new Set();
+    const walk = (d) => {
+      for (const list of d.methods.values()) for (const m of list) {
+        if (!m.pure || seen.has(m.name + '(' + m.sig + ')')) continue;
+        seen.add(m.name + '(' + m.sig + ')');
+        const impl = findImplIn(structs, def, m.name, m.sig);
+        if (!impl || impl.pure) left.push(m);
+      }
+      d.bases.forEach((b) => walk(structs.get(b.name)));
+    };
+    walk(def);
+    def.pureLeft = left;
+  };
+  for (const def of structs.values()) {
+    if (!def.methods) { def.bases = []; def.methods = new Map(); def.ctors = []; def.statics = []; def.friends = new Set(); def.friendClasses = new Set(); def.complete = true; }
+    link(def);
+  }
+  for (const def of structs.values()) for (const st of def.statics) {
+    if (st.defined) continue;
+    const gname = def.name + '::' + st.name;
+    if (st.init) { globals.push({ k: 'decl', isConst: st.isConst, decls: [{ name: gname, type: st.type, ref: false, dims: [], init: st.init, line: st.line }], line: st.line }); st.defined = true; continue; }
+    throw new CppError(`المتغير الثابت ${C('static ' + st.name)} في الكلاس ${C(def.name)} يجب أن يُعرَّف أيضًا خارج الكلاس، مثل ${C(tstr(st.type) + ' ' + gname + ' = 0;')}`, st.line);
+  }
 }
 
 /* ======================= values ======================= */
@@ -641,6 +951,7 @@ function charsOf(arrCell) {              // char array -> JS string up to '\0'
   return s;
 }
 function fmtOut(a) {
+  if (a.t === 'ostream') return '';
   if (a.t === 'char') return String.fromCharCode(a.v);
   if (a.t === 'bool') return a.v ? '1' : '0';
   if (a.t === 'string') return a.v;
@@ -650,6 +961,7 @@ function fmtOut(a) {
 }
 function fmtShow(a) {
   if (!a) return '؟';
+  if (a.t === 'ostream') return 'cout';
   if (a.t === 'array') {
     if (elemBase(a.cell.type).k === 'char' && a.cell.type.of.k === 'char') return `"${charsOf(a.cell)}"`;
     return `{${a.cell.elems.map((c) => fmtShow(c.type.k === 'arr' ? { t: 'array', cell: c } : c.val)).join(', ')}}`;
@@ -694,10 +1006,237 @@ class Interp {
   }
   get top() { return this.frames[this.frames.length - 1]; }
   get scopes() { return this.top.scopes; }
-  pushFrame(fn, label, callLine) {
+  pushFrame(fn, label, callLine, o) {
     if (this.frames.length > MAX_DEPTH) throw new CppError(`تجاوز عدد الاستدعاءات المتداخلة ${MAX_DEPTH}. يبدو أن الاستدعاء الذاتي لا يصل إلى حالة التوقف`, callLine);
-    this.frames.push({ fn, label, callLine, scopes: [new Map()], ctx: [], active: [] });
+    this.frames.push(Object.assign({ fn, label, callLine, scopes: [new Map()], ctx: [], active: [] }, o || {}));
   }
+  // ---- classes ----
+  isDerived(a, b) { if (a === b) return true; const d = this.structs.get(a); return !!d && d.bases.some((x) => this.isDerived(x.name, b)); }
+  hasCtorLogic(def) {
+    if (def._ctor !== undefined) return def._ctor;
+    def._ctor = false;
+    def._ctor = def.ctors.length > 0 || def.bases.some((b) => this.hasCtorLogic(this.structs.get(b.name))) ||
+      def.fields.some((f) => (f.type.k === 'struct' && this.hasCtorLogic(this.structs.get(f.type.name))) || (f.init && !['num', 'chr', 'str', 'bool', 'null', 'un'].includes(f.init.k)));
+    return def._ctor;
+  }
+  hasDtorLogic(def) {
+    if (def._dtor !== undefined) return def._dtor;
+    def._dtor = false;
+    def._dtor = !!(def.dtor && def.dtor.body) || def.bases.some((b) => this.hasDtorLogic(this.structs.get(b.name))) ||
+      def.fields.some((f) => f.type.k === 'struct' && this.hasDtorLogic(this.structs.get(f.type.name)));
+    return def._dtor;
+  }
+  findMethod(cls, name) {                    // C++ name lookup: the first class (from cls upwards) that declares the name
+    const d = this.structs.get(cls);
+    if (!d) return null;
+    const list = d.methods.get(name);
+    if (list) return { list, owner: cls };
+    for (const b of d.bases) { const r = this.findMethod(b.name, name); if (r) return r; }
+    return null;
+  }
+  staticCell(cls, name) {
+    for (let d = this.structs.get(cls), q = [d]; q.length;) {
+      d = q.shift(); if (!d) continue;
+      const g = this.globals.get(d.name + '::' + name);
+      if (g) return g;
+      d.bases.forEach((b) => q.push(this.structs.get(b.name)));
+    }
+    return null;
+  }
+  pathAccess(from, to) {                     // access mode of the inheritance path from → to
+    if (from === to) return 'public';
+    const rank = { private: 0, protected: 1, public: 2 }, names = ['private', 'protected', 'public'];
+    let best = -1;
+    for (const b of this.structs.get(from).bases) {
+      if (!this.isDerived(b.name, to)) continue;
+      const r = Math.min(rank[b.access], rank[this.pathAccess(b.name, to)]);
+      best = Math.max(best, r);
+    }
+    return names[Math.max(best, 0)];
+  }
+  checkAccess(decl, owner, staticName, line, what) {
+    if (!decl || !decl.access || !owner) return;
+    const od = this.structs.get(owner);
+    const fr = this.top;
+    const ctx = fr.cls ? fr.cls.name : null;
+    const fname = fr.fn ? fr.fn.name : null;
+    const friend = (!ctx && od.friends.has(fname)) || (ctx && od.friendClasses.has(ctx));
+    if (friend) return;
+    const nm = C(decl.name);
+    if (decl.access === 'private') {
+      if (ctx === owner) return;
+      throw new CppError(`${what} ${nm} معرَّف ${C('private')} في الكلاس ${C(owner)}، فلا يُستخدم إلا داخل دوال الكلاس ${C(owner)} نفسه` +
+        (ctx && this.isDerived(ctx, owner) ? `، حتى الكلاس الابن ${C(ctx)} لا يراه. اجعله ${C('protected')} أو استخدم دالة get عامة` : `. استخدم دالة عامة (public) مثل get أو set`), line);
+    }
+    if (decl.access === 'protected') {
+      if (ctx && this.isDerived(ctx, owner)) return;
+      throw new CppError(`${what} ${nm} معرَّف ${C('protected')} في الكلاس ${C(owner)}، فيصل إليه الكلاس نفسه والكلاسات الوارثة منه فقط، وليس من خارجها مثل main`, line);
+    }
+    if (staticName && staticName !== owner && this.isDerived(staticName, owner)) {
+      const mode = this.pathAccess(staticName, owner);
+      if (mode === 'public' || ctx === staticName || (mode === 'protected' && ctx && this.isDerived(ctx, staticName))) return;
+      throw new CppError(`${what} ${nm} عام في ${C(owner)}، لكن الكلاس ${C(staticName)} يرث منه وراثة ${C(mode)}، فأصبح ${mode} ولا يُرى من الخارج`, line);
+    }
+  }
+  thisPtr(fr) { return { t: 'ptr', to: TSt(fr.cls.name), cell: fr.thisCell, arr: null, idx: 0 }; }
+  tempCell(v, label) { const c = this.makeCell(TSt(v.name), label || 'كائن مؤقت', { temp: true }); this.writeRaw(c, v, 0); return c; }
+  typeOfVal(v) { return v.t === 'struct' ? TSt(v.name) : v.t === 'ptr' ? TPtr(v.to || TP('int')) : v.t === 'array' ? TPtr(v.cell.type.of) : TP(v.t); }
+  copyCtor(def) { return def.ctors.find((k) => k.params.length === 1 && k.params[0].type.k === 'struct' && k.params[0].type.name === def.name); }
+  *evalArgs(list) {
+    const args = [];
+    for (const a of list) {
+      if (['var', 'index', 'member', 'arrow', 'deref', 'scoped'].includes(a.k)) {
+        const lv = yield* this.lv(a);
+        args.push({ v: this.getLv(lv, a.line, a.src), lv, node: a });
+      } else args.push({ v: yield* this.ev(a), lv: null, node: a });
+    }
+    return args;
+  }
+  // bind call arguments to parameter cells in the new (top) frame; returns the explanation parts
+  *bindParams(f, args, callerLine) {
+    const scope = this.top.scopes[0];
+    const binds = [];
+    for (let i = 0; i < f.params.length; i++) {
+      const p = f.params[i], a = args[i];
+      let v, lv = null;
+      if (!a) v = yield* this.ev(p.def); else { v = a.v; lv = a.lv; }
+      if (p.type.k === 'arr' && v.t === 'array') {
+        scope.set(p.name, { isRef: true, arrParam: true, name: p.name, cell: v.cell });
+        binds.push(`${C(p.name)} هي المصفوفة ${C(a.node.src)} نفسها (المصفوفة تُمرَّر بالمرجع دائمًا)`);
+      } else if (p.ref && (!lv || lv.str) && p.isConst) {
+        const t = p.type.k === 'auto' ? this.typeOfVal(v) : p.type;
+        const c = this.makeCell(t, p.name, { temp: true });
+        if (t.k === 'struct') this.writeRaw(c, this.convert(v, t, callerLine, p.name), callerLine); else c.val = this.convert(v, t, callerLine, p.name);
+        scope.set(p.name, { isRef: true, name: p.name, cell: c, rtype: t.k === 'struct' ? t : null });
+        binds.push(`${C(p.name)} مرجع ثابت إلى القيمة المؤقتة ${C(a.node.src)}`);
+      } else if (p.ref) {
+        if (!lv || lv.str) throw new CppError(`المعامل ${C(p.name)} بالمرجع ${C('&')} يجب أن يستقبل متغيرًا`, callerLine);
+        scope.set(p.name, { isRef: true, name: p.name, cell: lv.cell, rtype: p.type.k === 'struct' ? p.type : null });
+        binds.push(`${C(p.name)} مرجع إلى ${C(a.node.src)}، أي اسم آخر ${lv.cell.type.k === 'struct' ? 'للكائن' : 'للمتغير'} نفسه${lv.cell.type.k === 'struct' ? ' (بدون نسخ)' : ''}`);
+      } else {
+        let ptype = p.type.k === 'arr' ? TPtr(p.type.of) : p.type;
+        if (ptype.k === 'auto') ptype = this.typeOfVal(v);
+        const cell = this.makeCell(ptype, p.name, { isConst: p.isConst && ptype.k !== 'ptr' });
+        if (ptype.k === 'struct') {
+          const def = this.structs.get(ptype.name), cc = this.copyCtor(def);
+          scope.set(p.name, cell); this.touch(cell);
+          if (cc && v.t === 'struct' && v.name === ptype.name) {
+            yield this.step(callerLine, `الكائن ${C(a.node.src)} يُمرَّر بالقيمة، فيُنسخ إلى المعامل ${C(p.name)} باستدعاء الـ copy constructor.`);
+            yield* this.construct(cell, [{ v, lv, node: a.node }], { line: callerLine, src: a.node.src, name: ptype.name }, 'copy');
+          } else this.writeRaw(cell, this.convert(v, ptype, callerLine, p.name), callerLine);
+          binds.push(`${C(p.name)} = نسخة من الكائن ${C(a ? a.node.src : '')}`);
+          continue;
+        }
+        cell.val = this.convert(v, ptype, callerLine, p.name);
+        scope.set(p.name, cell);
+        this.touch(cell);
+        binds.push(`${C(p.name)} = <b>${esc(fmtShow(this.read(cell, callerLine)))}</b> (${!a ? 'القيمة الافتراضية' : ptype.k === 'ptr' ? 'نسخة من العنوان' : 'نسخة'})`);
+      }
+    }
+    return binds;
+  }
+  *construct(cell, args, n, how, defName) {
+    const def = this.structs.get(defName || cell.type.name);
+    if (!defName && def.pureLeft && def.pureLeft.length) {
+      const m = def.pureLeft[0];
+      throw new CppError(`لا يمكن إنشاء كائن من الكلاس المجرد ${C(def.name)}، لأن فيه الدالة المجردة ${C('virtual ' + m.name + '() = 0')}${m.cls !== def.name ? ` الموروثة من ${C(m.cls)} ولم يُعِد تعريفها` : ''}. أنشئ كائنًا من كلاس ابن يعيد تعريفها`, n.line);
+    }
+    let k = null;
+    if (def.ctors.length) {
+      const scored = def.ctors.map((f) => ({ f, s: this.scoreArgs(f, args) })).filter((x) => x.s >= 0).sort((a, b) => b.s - a.s);
+      if (!scored.length) {
+        const list = def.ctors.map((f) => C(def.name + '(' + f.params.map((q) => tstr(q.type)).join(', ') + ')')).join(' أو ');
+        throw new CppError(args.length === 0
+          ? `الكلاس ${C(def.name)} ليس فيه constructor بدون معاملات (default constructor)، لأنك كتبت constructor بمعاملات فلم يُضِف ${CPP} الافتراضي. الموجود: ${list}`
+          : `لا يوجد constructor في الكلاس ${C(def.name)} يناسب القيم المرسلة. الموجود: ${list}`, n.line);
+      }
+      k = scored[0].f;
+      if (!k.body) throw new CppError(`الـ constructor ${C(def.name + '(' + k.sig + ')')} مُعلَن بدون تعريف`, n.line);
+      if (k.access === 'private' && how !== 'delegate' && !(this.top.cls && this.top.cls.name === def.name))
+        throw new CppError(`الـ constructor ${C(def.name + '(' + k.sig + ')')} معرَّف ${C(k.access)}، فلا يمكن إنشاء الكائن من هنا`, n.line);
+    } else if (args.length) {
+      if (args.length === 1 && args[0].v.t === 'struct' && this.isDerived(args[0].v.name, def.name)) { this.writeRaw(cell, this.convert(args[0].v, TSt(def.name), n.line), n.line); return; }
+      throw new CppError(`الكلاس ${C(def.name)} ليس فيه constructor يستقبل قيمًا. أضف constructor مثل ${C(def.name + '(...)')}`, n.line);
+    }
+    if (!k && !this.hasCtorLogic(def)) return;
+    const label = `${def.name}(${k ? k.params.map((q) => q.name).join(', ') : ''})`;
+    this.pushFrame(k || { name: def.name, params: [], isCtor: true, ret: TP('void') }, label, n.line, { thisCell: cell, cls: def, isCtor: true });
+    try {
+      const binds = k ? yield* this.bindParams(k, args, n.line) : [];
+      const who = how === 'base' ? `الجزء الموروث من ${C(def.name)} في الكائن ${C(cell.label)}` : `الكائن ${C(cell.label)}`;
+      if (k) yield this.step(k.line, `يُنفَّذ الـ ${how === 'copy' ? 'copy constructor' : 'constructor'} ${C(label)} لتهيئة ${who}، و${C('this')} يشير إليه` + (binds.length ? `. المعاملات: ${binds.join('، و')}.` : '.'), { call: true });
+      else yield this.step(def.line, `الكلاس ${C(def.name)} ليس فيه constructor مكتوب، فيستخدم ${CPP} الـ default constructor تلقائيًا لتهيئة ${who}.`, { call: true });
+      const init = (k && k.init) || [];
+      const deleg = init.find((x) => x.name === def.name);
+      if (deleg) {
+        const a2 = yield* this.evalArgs(deleg.args);
+        yield this.step(deleg.line, `${C(def.name + '(' + deleg.args.map((x) => x.src).join(', ') + ')')} في قائمة التهيئة تستدعي constructor آخر من الكلاس نفسه.`);
+        yield* this.construct(cell, a2, deleg, 'delegate', def.name);
+      } else {
+        for (const b of def.bases) {
+          const it = init.find((x) => x.name === b.name);
+          const bargs = it ? yield* this.evalArgs(it.args) : [];
+          const bd = this.structs.get(b.name);
+          if (!it && !this.hasCtorLogic(bd)) continue;
+          yield this.step(it ? it.line : (k ? k.line : def.line), it
+            ? `قائمة التهيئة تستدعي constructor الكلاس الأب ${C(b.name)} أولًا: ${C(b.name + '(' + it.args.map((x) => x.src).join(', ') + ')')}.`
+            : `قبل جسم الـ constructor يُستدعى تلقائيًا constructor الكلاس الأب ${C(b.name)} بدون معاملات.`);
+          yield* this.construct(cell, bargs, it || n, 'base', b.name);
+        }
+        for (const f of def.fields) {
+          const fc = cell.fields.get(f.name);
+          const it = init.find((x) => x.name === f.name);
+          if (fc.type.k === 'struct') {
+            const md = this.structs.get(fc.type.name);
+            if (it) { const margs = yield* this.evalArgs(it.args); yield this.step(it.line, `تهيئة الكائن العضو ${C(f.name)} من قائمة التهيئة، قبل جسم الـ constructor.`); yield* this.construct(fc, margs, it, 'member'); }
+            else if (this.hasCtorLogic(md)) yield* this.construct(fc, [], n, 'member');
+            continue;
+          }
+          if (it) {
+            if (it.args.length !== 1) throw new CppError(`الحقل ${C(f.name)} في قائمة التهيئة يأخذ قيمة واحدة`, it.line);
+            const v = yield* this.ev(it.args[0]);
+            fc.val = this.convert(v, fc.type, it.line, f.name); fc.garbage = false; this.touch(fc);
+            yield this.step(it.line, `قائمة التهيئة: الحقل ${C(f.name)} يأخذ القيمة <b>${esc(fmtShow(fc.val))}</b> قبل تنفيذ جسم الـ constructor.`);
+          } else if (f.init && fc.pendingInit) {
+            fc.val = this.convert(yield* this.ev(f.init), fc.type, f.line, f.name); fc.garbage = false; this.touch(fc);
+            yield this.step(f.line, `تهيئة الحقل ${C(f.name)} بالقيمة <b>${esc(fmtShow(fc.val))}</b> كما كُتبت عند تعريفه.`);
+          }
+        }
+      }
+      if (k) {
+        try { yield* this.block(k.body.body, false); } catch (e) { if (!(e instanceof ReturnSig)) throw e; }
+        yield* this.destroyScope(this.top.scopes[0], k.body.endLine);
+        yield this.step(k.body.endLine, `انتهى الـ constructor ${C(label)}، و${how === 'base' ? 'الجزء الموروث' : 'الكائن ' + C(cell.label)} جاهز.`);
+      }
+    } finally { this.frames.pop(); }
+  }
+  *destroy(cell, line, why, defName) {
+    const def = this.structs.get(defName || cell.type.name);
+    if (!this.hasDtorLogic(def)) return;
+    const d = def.dtor;
+    if (d && d.body) {
+      this.pushFrame(d, `~${def.name}()`, line, { thisCell: cell, cls: def });
+      try {
+        const msg = why === 'scope' ? `انتهى نطاق ${C(cell.label)}${line ? ` عند السطر ${line}` : ''}، فيُستدعى الـ destructor ${C('~' + def.name + '()')} تلقائيًا.`
+          : why === 'delete' ? `${C('delete')} تستدعي الـ destructor ${C('~' + def.name + '()')} للكائن ${C(cell.label)} قبل تحرير ذاكرته.`
+          : why === 'base' ? `بعد destructor الابن يُستدعى destructor الكلاس الأب ${C('~' + def.name + '()')}.`
+          : `يُستدعى الـ destructor ${C('~' + def.name + '()')} للكائن العضو ${C(cell.label)}.`;
+        yield this.step(d.line, msg, { call: true });
+        try { yield* this.block(d.body.body, false); } catch (e) { if (!(e instanceof ReturnSig)) throw e; }
+      } finally { this.frames.pop(); }
+    }
+    for (const f of [...def.fields].reverse()) { const fc = cell.fields.get(f.name); if (fc.type.k === 'struct') yield* this.destroy(fc, line, 'member'); }
+    for (const b of [...def.bases].reverse()) yield* this.destroy(cell, line, d && d.body ? 'base' : why, b.name);
+  }
+  *destroyScope(scope, line, keep) {
+    const cells = [...scope.values()].filter((c) => !c.isRef && c !== keep);
+    for (const c of cells.reverse()) {
+      if (c.type.k === 'struct' && this.hasDtorLogic(this.structs.get(c.type.name))) yield* this.destroy(c, line, 'scope');
+      else if (c.type.k === 'arr' && elemBase(c.type).k === 'struct' && this.hasDtorLogic(this.structs.get(elemBase(c.type).name)))
+        for (const e of [...c.elems].reverse()) yield* this.destroy(e, line, 'scope');
+    }
+  }
+  scoreArgs(f, args) { try { return this.resolveScore(f, args); } catch (e) { return -1; } }
 
   // ---- cells ----
   makeCell(type, label, o) {
@@ -715,9 +1254,9 @@ class Interp {
     } else if (type.k === 'struct') {
       const def = this.structs.get(type.name);
       c.fields = new Map();
-      for (const f of def.fields) {
-        const fc = this.makeCell(f.type, `${label}.${f.name}`, { parent: c, field: f.name, heap: c.heap });
-        if (f.init) fc.val = this.convert(this.constEval(f.init), f.type, f.line, f.name);
+      for (const f of def.allFields || def.fields) {
+        const fc = this.makeCell(f.type, `${label}.${f.name}`, { parent: c, field: f.name, heap: c.heap, decl: f, owner: f.owner || def.name });
+        if (f.init) { try { fc.val = this.convert(this.constEval(f.init), f.type, f.line, f.name); } catch (e) { fc.pendingInit = true; } }
         c.fields.set(f.name, fc);
       }
     }
@@ -760,6 +1299,7 @@ class Interp {
   }
   copyArr(c) { return { t: 'arrcopy', vals: c.elems.map((e) => (e.type.k === 'arr' ? this.copyArr(e) : e.type.k === 'struct' ? this.read(e, 0) : e.val)) }; }
   write(c, v, line, label) {
+    if (this.frames.length && this.top.constThis && this.top.thisCell) { for (let q = c.parent; q; q = q.parent) if (q === this.top.thisCell) throw new CppError(`لا يمكن تعديل ${C(label || c.label)} داخل دالة ${C('const')}. الدالة المكتوب بعدها const تقرأ حقول الكائن فقط ولا تغيّرها`, line); }
     if (c.freed) throw new CppError(`الكتابة في ذاكرة محذوفة: ${C(c.label)} حُذفت بـ delete`, line);
     if (c.isConst || (c.parent && this.constRoot(c))) throw new CppError(`لا يمكن تغيير قيمة الثابت ${C(label || c.label)} لأنه معرَّف بـ const`, line);
     if (c.type.k === 'arr') {
@@ -768,6 +1308,7 @@ class Interp {
       throw new CppError('لا يمكن إسناد مصفوفة كاملة دفعة واحدة. استخدم حلقة لنسخ العناصر، أو strcpy للنصوص', line);
     }
     if (c.type.k === 'struct') {
+      if (v.t === 'struct' && v.name !== c.type.name) v = this.convert(v, c.type, line, label);
       if (v.t !== 'struct' || v.name !== c.type.name) throw new CppError(`لا يمكن تخزين ${typeAr[v.t] || v.t} في السجل ${C(label || c.label)} من النوع ${c.type.name}`, line);
       for (const [k, fv] of v.f) this.writeRaw(c.fields.get(k), fv, line);
       this.touch(c);
@@ -792,18 +1333,31 @@ class Interp {
     return S(s);
   }
   constRoot(c) { for (let p = c.parent; p; p = p.parent) if (p.isConst) return true; return false; }
-  convert(v, type, line, name) {
+  convert(v, type, line, name, explicit) {
     const where = name ? ' ' + C(name) : '';
     if (v.t === 'void') throw new CppError(`الدالة من النوع void لا تُرجع قيمة يمكن تخزينها${where}`, line);
-    if (type.k === 'auto') return v;
+    if (type.k === 'auto' || type.k === 'ostream') return v;
     if (type.k === 'ptr') {
-      if (v.t === 'ptr') return Object.assign({}, v, { to: type.to });
+      if (v.t === 'ptr') {
+        if (!explicit && type.to && type.to.k === 'struct' && v.to && v.to.k === 'struct' && v.to.name !== type.to.name && (v.cell || v.arr) && this.structs.get(v.to.name) && this.structs.get(type.to.name)) {
+          if (!this.isDerived(v.to.name, type.to.name))
+            throw new CppError(this.isDerived(type.to.name, v.to.name)
+              ? `لا يمكن وضع مؤشر من النوع ${C(v.to.name + '*')} في${where} من النوع ${C(type.to.name + '*')} مباشرة، لأن الأب ليس بالضرورة ابنًا. استخدم ${C('dynamic_cast<' + type.to.name + '*>(...)')}`
+              : `لا يمكن وضع مؤشر من النوع ${C(v.to.name + '*')} في${where} من النوع ${C(type.to.name + '*')}`, line);
+        }
+        return Object.assign({}, v, { to: type.to });
+      }
       if (v.t === 'array') { const c0 = v.cell.elems[0]; return { t: 'ptr', to: type.to, cell: c0, arr: v.cell, idx: 0 }; }
       if (v.t === 'int' && v.v === 0) return NULLP(type.to);
       throw new CppError(`لا يمكن تخزين ${typeAr[v.t] || v.t} في المؤشر${where}. المؤشر يخزن عنوانًا مثل ${C('&x')} أو ${C('nullptr')}`, line);
     }
     if (type.k === 'struct') {
       if (v.t === 'struct' && v.name === type.name) return v;
+      if (v.t === 'struct' && this.isDerived(v.name, type.name)) {
+        const keep = new Set(this.structs.get(type.name).allFields.map((f) => f.name));
+        this.pendingWarn = `نسخ كائن ${C(v.name)} في متغير من النوع ${C(type.name)} يقطع الأجزاء الخاصة بالابن (object slicing)، ولا تبقى إلا حقول ${C(type.name)}. لاستخدام تعدد الأشكال استخدم مؤشرًا أو مرجعًا`;
+        return { t: 'struct', name: type.name, f: new Map([...v.f].filter(([k]) => keep.has(k))) };
+      }
       throw new CppError(`لا يمكن تخزين ${typeAr[v.t] || v.t} في${where} من النوع ${type.name}`, line);
     }
     if (v.t === 'array') throw new CppError(`لا يمكن استخدام المصفوفة كاملة كقيمة${where}. استخدم عنصرًا مثل ${C('a[0]')}`, line);
@@ -827,6 +1381,18 @@ class Interp {
   entry(name, line, quiet) {
     const sc = this.top.scopes;
     for (let i = sc.length - 1; i >= 0; i--) if (sc[i].has(name)) return sc[i].get(name);
+    const fr = this.top;
+    if (fr.cls) {
+      if (fr.thisCell && fr.thisCell.fields && fr.thisCell.fields.has(name)) {
+        const fc = fr.thisCell.fields.get(name);
+        if (!quiet) this.checkAccess(fc.decl, fc.owner, fr.cls.name, line, 'الحقل');
+        return fc;
+      }
+      const st = this.staticCell(fr.cls.name, name);
+      if (st) return st;
+      if (!fr.thisCell && !quiet && fr.cls.allFields.some((f) => f.name === name))
+        throw new CppError(`لا يمكن استخدام الحقل ${C(name)} داخل دالة ${C('static')}، لأن الدالة static لا تتبع كائنًا معيّنًا ولا يوجد ${C('this')}`, line);
+    }
     if (this.globals.has(name)) return this.globals.get(name);
     if (quiet) return null;
     if (this.prog.funcs.has(name)) throw new CppError(`${C(name)} اسم دالة. لاستدعائها اكتب ${C(name + '(...)')}`, line);
@@ -859,7 +1425,15 @@ class Interp {
   normPtr(v) { if (v.t === 'ptr' && !v.arr && v.cell && v.cell.parent && v.cell.parent.type.k === 'arr') return { t: 'ptr', to: v.to, cell: v.cell, arr: v.cell.parent, idx: v.cell.index }; return v; }
   *lv(n) {        // lvalue -> {cell} or {str: cell, i}
     switch (n.k) {
-      case 'var': return { cell: this.cellOf(n.name, n.line) };
+      case 'var': { const e = this.entry(n.name, n.line); return e.isRef ? { cell: e.cell, rtype: e.rtype } : { cell: e }; }
+      case 'scoped': {
+        if (!this.structs.has(n.cls)) throw new CppError(`${C(n.cls)} ليس كلاسًا`, n.line);
+        const st = this.staticCell(n.cls, n.name);
+        if (!st) throw new CppError(`${C(n.src)} ليس متغيرًا ثابتًا static في الكلاس ${C(n.cls)}`, n.line);
+        const d = this.structs.get(n.cls).statics.find((x) => x.name === n.name);
+        if (d) this.checkAccess(d, n.cls, n.cls, n.line, 'المتغير الثابت');
+        return { cell: st };
+      }
       case 'index': {
         let base = null;
         if (['var', 'index', 'member', 'arrow', 'deref'].includes(n.base.k)) base = (yield* this.lv(n.base));
@@ -889,8 +1463,10 @@ class Interp {
           throw new CppError(`${C(n.obj.src)} ليس سجلًا، فلا يمكن استخدام ${C('.')} معه`, n.line);
         }
         const f = o.cell.fields.get(n.name);
-        if (!f) throw new CppError(`السجل ${C(o.cell.type.name)} لا يحتوي على حقل اسمه ${C(n.name)}`, n.line);
+        const stName = o.rtype ? o.rtype.name : o.cell.type.name;
+        if (!f) { const st = this.staticCell(o.cell.type.name, n.name); if (st) return { cell: st }; throw this.noMember(o.cell.type.name, n); }
         if (o.cell.freed) throw new CppError(`استخدام ذاكرة محذوفة: ${C(o.cell.label)}`, n.line);
+        this.checkAccess(f.decl, f.owner, stName, n.line, 'الحقل');
         return { cell: f };
       }
       case 'arrow': {
@@ -899,7 +1475,10 @@ class Interp {
         const c = this.derefPtr(pv, n.line, n.obj.src);
         if (c.type.k !== 'struct') throw new CppError(`${C(n.obj.src)} لا يشير إلى سجل`, n.line);
         const f = c.fields.get(n.name);
-        if (!f) throw new CppError(`السجل ${C(c.type.name)} لا يحتوي على حقل اسمه ${C(n.name)}`, n.line);
+        if (!f) { const st = this.staticCell(c.type.name, n.name); if (st) return { cell: st }; throw this.noMember(c.type.name, n); }
+        this.checkAccess(f.decl, f.owner, pv.to && pv.to.k === 'struct' ? pv.to.name : c.type.name, n.line, 'الحقل');
+        if (n.obj.k !== 'this' && pv.to && pv.to.k === 'struct' && pv.to.name !== c.type.name && !this.structs.get(pv.to.name).allFields.some((x) => x.name === n.name))
+          throw new CppError(`المؤشر ${C(n.obj.src)} نوعه ${C(pv.to.name + '*')}، والكلاس ${C(pv.to.name)} لا يحتوي الحقل ${C(n.name)}. المترجم ينظر إلى نوع المؤشر وليس إلى الكائن الحقيقي`, n.line);
         return { cell: f };
       }
       case 'deref': {
@@ -908,6 +1487,11 @@ class Interp {
       }
     }
     throw new CppError('متوقع متغير', n.line);
+  }
+  noMember(cls, n) {
+    const d = this.structs.get(cls);
+    if (this.findMethod(cls, n.name)) return new CppError(`${C(n.name)} دالة في الكلاس ${C(cls)} وليست حقلًا. لاستدعائها اكتب ${C(n.src + '()')}`, n.line);
+    return new CppError(`${d && d.isClass ? 'الكلاس' : 'السجل'} ${C(cls)} لا يحتوي على عضو اسمه ${C(n.name)}`, n.line);
   }
   getLv(lv, line, label) {
     if (lv.str) return CH(this.read(lv.str, line).v.charCodeAt(lv.i));
@@ -936,6 +1520,7 @@ class Interp {
         return null;
       }
       case 'member': { const o = this.peekCell(n.obj); return o && o.fields ? o.fields.get(n.name) || null : null; }
+      case 'scoped': return this.structs.has(n.cls) ? this.staticCell(n.cls, n.name) : null;
       case 'arrow': { const v = this.peekVal(n.obj); return v && v.t === 'ptr' && v.cell && v.cell.fields && !v.cell.freed ? v.cell.fields.get(n.name) || null : null; }
       case 'deref': { const v = this.peekVal(n.e); return v && v.t === 'ptr' && v.cell && !v.cell.freed ? v.cell : null; }
     }
@@ -1048,7 +1633,28 @@ class Interp {
       case 'endl': throw new CppError(`${C('endl')} تُستخدم مع cout فقط`, n.line);
       case 'list': throw new CppError(`القائمة ${C('{ }')} تُستخدم عند التعريف فقط`, n.line);
       case 'cinobj': throw new CppError(`${C('cin')} لا تُستخدم هنا`, n.line);
-      case 'var': case 'index': case 'member': case 'arrow': case 'deref': { const lv = yield* this.lv(n); return this.getLv(lv, n.line, n.src); }
+      case 'var': case 'index': case 'member': case 'arrow': case 'deref': case 'scoped': { const lv = yield* this.lv(n); return this.getLv(lv, n.line, n.src); }
+      case 'this': {
+        const fr = this.top;
+        if (!fr.thisCell) throw new CppError(fr.cls ? `لا يوجد ${C('this')} داخل دالة ${C('static')}` : `${C('this')} يُستخدم داخل دوال الكلاس فقط`, n.line);
+        return this.thisPtr(fr);
+      }
+      case 'construct': {
+        const def = this.structs.get(n.type.name);
+        const cell = this.makeCell(n.type, `${n.type.name}(…)`, { temp: true });
+        const args = yield* this.evalArgs(n.args);
+        if (def.ctors.length || args.length || this.hasCtorLogic(def)) yield* this.construct(cell, args, n, 'temp');
+        return this.read(cell, n.line);
+      }
+      case 'dyncast': {
+        const v = yield* this.ev(n.e);
+        if (n.type.k !== 'ptr' || n.type.to.k !== 'struct') throw new CppError(`${C('dynamic_cast')} في المختبر تُستخدم مع مؤشرات الكلاسات، مثل ${C('dynamic_cast<Dog*>(p)')}`, n.line);
+        if (v.t !== 'ptr') throw new CppError(`${C('dynamic_cast')} تحوّل مؤشرًا`, n.line);
+        if (!v.cell) return NULLP(n.type.to);
+        const ok = this.isDerived(v.cell.type.name, n.type.to.name);
+        this.notes.push(ok ? `${C('dynamic_cast')} نجح لأن الكائن الحقيقي من النوع ${C(v.cell.type.name)}.` : `${C('dynamic_cast')} أعاد ${C('nullptr')} لأن الكائن الحقيقي من النوع ${C(v.cell.type.name)} وليس ${C(n.type.to.name)}.`);
+        return ok ? Object.assign({}, v, { to: n.type.to }) : NULLP(n.type.to);
+      }
       case 'addr': {
         const lv = yield* this.lv(n.e);
         if (lv.str) throw new CppError('لا يمكن أخذ عنوان حرف داخل string في المختبر', n.line);
@@ -1056,11 +1662,31 @@ class Interp {
         if (c.type.k === 'arr') return { t: 'ptr', to: c.type, cell: c, arr: null, idx: 0 };
         return this.normPtr({ t: 'ptr', to: c.type, cell: c, arr: null, idx: 0 });
       }
-      case 'new': return this.newObj(n, yield* (n.n ? this.ev(n.n) : (function* () { return null; })()), n.init ? yield* (n.init.k === 'list' ? this.evList(n.init) : this.ev(n.init)) : null);
+      case 'new': {
+        const def = n.type.k === 'struct' ? this.structs.get(n.type.name) : null;
+        if (def && (n.args || this.hasCtorLogic(def)) && !(n.init && n.init.k === 'list' && !def.ctors.length)) {
+          if (def.pureLeft && def.pureLeft.length) throw new CppError(`لا يمكن إنشاء كائن من الكلاس المجرد ${C(def.name)} بـ ${C('new')}، لأن فيه الدالة المجردة ${C(def.pureLeft[0].name + '() = 0')}`, n.line);
+          if (n.n) {
+            const cnt = yield* this.ev(n.n);
+            const ptr = this.newObj(n, cnt, null);
+            for (const e of ptr.arr.elems) yield* this.construct(e, [], n, 'new');
+            return ptr;
+          }
+          const args = n.args ? yield* this.evalArgs(n.args) : n.init && n.init.k === 'list' ? yield* this.evalArgs(n.init.items) : [];
+          const id = ++this.heapCount;
+          const cell = this.makeCell(n.type, '#' + id, { heap: true, id });
+          this.heap.push(cell);
+          yield this.step(n.line, `${C('new')} تحجز في الذاكرة الديناميكية (heap) كائنًا جديدًا ${C('#' + id)} من الكلاس ${C(def.name)}، ثم يُستدعى الـ constructor لتهيئته.`);
+          yield* this.construct(cell, args, n, 'new');
+          return { t: 'ptr', to: n.type, cell, arr: null, idx: 0 };
+        }
+        return this.newObj(n, yield* (n.n ? this.ev(n.n) : (function* () { return null; })()), n.init ? yield* (n.init.k === 'list' ? this.evList(n.init) : this.ev(n.init)) : null);
+      }
       case 'bin': {
         if (n.op === '&&') { const l = this.truthy(yield* this.ev(n.l), n.line); return l ? B(this.truthy(yield* this.ev(n.r), n.line)) : B(false); }
         if (n.op === '||') { const l = this.truthy(yield* this.ev(n.l), n.line); return l ? B(true) : B(this.truthy(yield* this.ev(n.r), n.line)); }
         const a = yield* this.ev(n.l), b = yield* this.ev(n.r);
+        if (a.t === 'struct' || b.t === 'struct') return yield* this.opCall(n.op, a, b, n);
         return this.arith(n.op, a, b, n.line);
       }
       case 'un': {
@@ -1079,6 +1705,22 @@ class Interp {
       }
       case 'assign': {
         const lv = yield* this.lv(n.target);
+        if (lv.cell && lv.cell.type.k === 'struct' && n.e.k !== 'list') {
+          const cls = lv.cell.type.name;
+          if (n.op !== '=' && this.findMethod(cls, 'operator' + n.op)) {
+            const b = yield* this.evalArgs([n.e]);
+            return yield* this.memberCall(lv.cell, cls, { name: 'operator' + n.op, line: n.line, src: n.src, args: [] }, 'op', b);
+          }
+          if (n.op !== '=') {
+            const b = yield* this.ev(n.e);
+            const r = yield* this.opCall(n.op.slice(0, -1), this.read(lv.cell, n.line), b, n);
+            return this.setLv(lv, r, n.line, n.target.src);
+          }
+          if (this.findMethod(cls, 'operator=')) {
+            const b = yield* this.evalArgs([n.e]);
+            return yield* this.memberCall(lv.cell, cls, { name: 'operator=', line: n.line, src: n.src, args: [] }, 'op', b);
+          }
+        }
         let v;
         if (n.e.k === 'list') {
           if (!lv.cell || lv.cell.type.k !== 'struct') throw new CppError(`القائمة ${C('{ }')} تُسند إلى سجل فقط`, n.line);
@@ -1088,7 +1730,7 @@ class Interp {
         return this.setLv(lv, v, n.line, n.target.src);
       }
       case 'tern': return this.truthy(yield* this.ev(n.c), n.line) ? yield* this.ev(n.a) : yield* this.ev(n.b);
-      case 'cast': return this.convert(yield* this.ev(n.e), n.type, n.line);
+      case 'cast': return this.convert(yield* this.ev(n.e), n.type, n.line, null, true);
       case 'call': return yield* this.call(n);
       case 'mcall': return yield* this.method(n);
     }
@@ -1150,10 +1792,22 @@ class Interp {
       }
       throw new CppError(`${C('cin.' + n.name)} غير مدعومة في المختبر`, n.line);
     }
-    if (n.arrow) throw new CppError(`الدوال داخل السجلات ليست ضمن المختبر حاليًا`, n.line);
     let lv = null, v;
-    if (['var', 'index', 'member', 'arrow', 'deref'].includes(n.obj.k)) { lv = yield* this.lv(n.obj); v = this.getLv(lv, n.line, n.obj.src); }
-    else v = yield* this.ev(n.obj);
+    if (n.arrow) {
+      const pv = yield* this.ev(n.obj);
+      const c = this.derefPtr(pv, n.line, n.obj.src);
+      if (c.type.k !== 'struct') throw new CppError(`${C(n.obj.src)} لا يشير إلى كائن، فلا يمكن استخدام ${C('->')} معه`, n.line);
+      return yield* this.memberCall(c, pv.to && pv.to.k === 'struct' ? pv.to.name : c.type.name, n, n.obj.k === 'this' ? 'this' : 'ptr');
+    }
+    if (['var', 'index', 'member', 'arrow', 'deref', 'scoped'].includes(n.obj.k)) {
+      lv = yield* this.lv(n.obj);
+      if (lv.cell && lv.cell.type.k === 'struct') return yield* this.memberCall(lv.cell, lv.rtype ? lv.rtype.name : lv.cell.type.name, n, lv.rtype ? 'ref' : 'obj');
+      if (lv.cell && lv.cell.type.k === 'ptr') throw new CppError(`${C(n.obj.src)} مؤشر. لاستدعاء الدالة عبره استخدم ${C('->')}: ${C(n.obj.src + '->' + n.name + '()')}`, n.line);
+      v = this.getLv(lv, n.line, n.obj.src);
+    } else {
+      v = yield* this.ev(n.obj);
+      if (v.t === 'struct') return yield* this.memberCall(this.tempCell(v), v.name, n, 'obj');
+    }
     if (v.t !== 'string') throw new CppError(`${C('.' + n.name + '()')} تُستخدم مع النصوص string`, n.line);
     const s = v.v;
     const args = []; for (const a of n.args) args.push(yield* this.ev(a));
@@ -1190,54 +1844,105 @@ class Interp {
   // ---- function calls ----
   *call(n) {
     if (n.name === 'getline') return yield* this.getline(n);
+    if (n.cls) return yield* this.qualifiedCall(n);
+    const fr = this.top;
+    if (fr.cls && this.findMethod(fr.cls.name, n.name) && !(this.prog.funcs.has(n.name) && !this.findMethod(fr.cls.name, n.name)))
+      return yield* this.memberCall(fr.thisCell || null, fr.cls.name, n, fr.thisCell ? 'this' : 'static');
     const user = this.prog.funcs.get(n.name);
-    if (!user) return yield* this.builtin(n);
-    const args = [];
-    for (const a of n.args) {
-      if (['var', 'index', 'member', 'arrow', 'deref'].includes(a.k)) {
-        const lv = yield* this.lv(a);
-        const v = this.getLv(lv, a.line, a.src);
-        args.push({ v, lv, node: a });
-      } else args.push({ v: yield* this.ev(a), lv: null, node: a });
+    if (!user) {
+      if (this.structs.has(n.name)) return yield* this.ev({ k: 'construct', type: TSt(n.name), args: n.args, line: n.line, src: n.src });
+      return yield* this.builtin(n);
     }
+    const args = yield* this.evalArgs(n.args);
     const f = this.resolve(user, args, n);
-    const binds = [];
-    const label = `${f.name}(${f.params.map((p) => p.name).join(', ')})`;
+    return yield* this.invoke(f, args, n, null);
+  }
+  *qualifiedCall(n) {
+    const found = this.findMethod(n.cls, n.name);
+    if (!found) throw new CppError(`الكلاس ${C(n.cls)} لا يحتوي الدالة ${C(n.name)}`, n.line);
+    const args = yield* this.evalArgs(n.args);
+    const m = this.resolve(found.list, args, n);
+    this.checkAccess(m, found.owner, n.cls, n.line, 'الدالة');
+    if (m.static) return yield* this.invoke(m, args, n, { cls: this.structs.get(found.owner), how: 'static' });
+    const fr = this.top;
+    if (fr.thisCell && this.isDerived(fr.thisCell.type.name, n.cls)) {
+      if (!m.body) throw new CppError(`الدالة ${C(n.cls + '::' + n.name)} بلا جسم`, n.line);
+      return yield* this.invoke(m, args, n, { thisCell: fr.thisCell, cls: this.structs.get(found.owner), how: 'base', constThis: m.constM });
+    }
+    throw new CppError(`الدالة ${C(n.cls + '::' + n.name)} ليست ${C('static')}، فتحتاج كائنًا لاستدعائها، مثل ${C('obj.' + n.name + '()')}`, n.line);
+  }
+  // obj.method(...), p->method(...), this->method(...), method(...) inside the class
+  *memberCall(cell, staticName, n, how, preArgs) {
+    const args = preArgs || (yield* this.evalArgs(n.args));
+    const found = this.findMethod(staticName, n.name);
+    if (!found) {
+      const d = this.structs.get(staticName);
+      if (d && d.allFields.some((f) => f.name === n.name)) throw new CppError(`${C(n.name)} حقل في الكلاس ${C(staticName)} وليس دالة`, n.line);
+      const real = cell && cell.type.name !== staticName && this.findMethod(cell.type.name, n.name);
+      throw new CppError(real
+        ? `${C(n.src)}: النوع ${C(staticName)} لا يحتوي الدالة ${C(n.name + '()')}، رغم أن الكائن الحقيقي من النوع ${C(cell.type.name)}. المترجم ينظر إلى نوع المؤشر أو المرجع، فحوّله أولًا بـ ${C('dynamic_cast<' + cell.type.name + '*>(...)')}`
+        : `${d && d.isClass ? 'الكلاس' : 'السجل'} ${C(staticName)} لا يحتوي الدالة ${C(n.name + '()')}`, n.line);
+    }
+    const m0 = this.resolve(found.list, args, n);
+    this.checkAccess(m0, found.owner, staticName, n.line, 'الدالة');
+    if (m0.static) return yield* this.invoke(m0, args, n, { cls: this.structs.get(found.owner), how: 'static' });
+    if (!cell) throw new CppError(`لا يمكن استدعاء الدالة ${C(n.name + '()')} داخل دالة ${C('static')}، لأنها تحتاج كائنًا (this)`, n.line);
+    let m = m0, owner = found.owner, note = '';
+    const dyn = cell.type.name;
+    if (m0.isVirtual) {
+      const impl = findImplIn(this.structs, this.structs.get(dyn), m0.name, m0.sig);
+      if (impl && !impl.pure) { m = impl; owner = impl.cls; }
+      if (how !== 'this' && how !== 'op' && staticName !== dyn)
+        note = `المؤشر أو المرجع نوعه ${C(staticName)} لكن الكائن الحقيقي من النوع ${C(dyn)}، والدالة ${C('virtual')}، فتُنفَّذ نسخة ${C(owner)} (تعدد الأشكال polymorphism).`;
+      else if (how === 'this' && owner !== found.owner) note = `الدالة ${C('virtual')} والكائن الحقيقي من النوع ${C(dyn)}، فتُنفَّذ نسخة ${C(owner)}.`;
+    } else if (staticName !== dyn) {
+      const impl = findImplIn(this.structs, this.structs.get(dyn), m0.name, m0.sig);
+      if (impl && impl !== m0) note = `الدالة ليست ${C('virtual')}، فتُنفَّذ نسخة ${C(owner)} حسب نوع المؤشر ${C(staticName)}، وليس نسخة ${C(dyn)} رغم أن الكائن الحقيقي من النوع ${C(dyn)}. لتعدد الأشكال اكتب ${C('virtual')} في الكلاس الأب.`;
+    }
+    if (!m.body) throw new CppError(m.pure ? `الدالة ${C(m.name)} مجردة (pure virtual) بلا جسم` : `الدالة ${C(owner + '::' + m.name)} مُعلَنة بدون تعريف. اكتب جسمها داخل الكلاس أو خارجه ${C(tstr(m.ret) + ' ' + owner + '::' + m.name + '(...) { }')}`, n.line);
+    return yield* this.invoke(m, args, n, { thisCell: cell, cls: this.structs.get(owner), how, note, staticName, constThis: m.constM });
+  }
+  // operators on objects: member operator first, then a global/friend function
+  *opCall(op, a, b, n) {
+    const name = 'operator' + op;
+    const lvOf = function* (node) { return node && ['var', 'index', 'member', 'arrow', 'deref', 'scoped'].includes(node.k) ? yield* this.lv(node) : null; }.bind(this);
+    const node = { name, line: n.line, src: n.src, args: [] };
+    if (a.t === 'struct' && this.findMethod(a.name, name)) {
+      const la = yield* lvOf(n.l);
+      const cell = la && la.cell && la.cell.type.k === 'struct' ? la.cell : this.tempCell(a);
+      return yield* this.memberCall(cell, a.name, node, 'op', [{ v: b, lv: yield* lvOf(n.r), node: n.r || n }]);
+    }
+    const g = this.prog.funcs.get(name);
+    if (g) {
+      const args = [{ v: a, lv: yield* lvOf(n.l), node: n.l || n }, { v: b, lv: yield* lvOf(n.r), node: n.r || n }];
+      return yield* this.invoke(this.resolve(g, args, node), args, node, null);
+    }
+    const cls = a.t === 'struct' ? a.name : b.name;
+    throw new CppError(`لا يوجد تعريف للعامل ${C(op)} مع كائنات ${C(cls)}. عرّف الدالة ${C(name)} داخل الكلاس، مثل ${C(`bool ${name}(const ${cls}& other) const`)}`, n.line);
+  }
+  *invoke(f, args, n, ctx) {
+    const isMethod = ctx && ctx.cls;
+    const label = isMethod ? `${ctx.cls.name}::${f.name}(${f.params.map((p) => p.name).join(', ')})` : `${f.name}(${f.params.map((p) => p.name).join(', ')})`;
     const callerLine = n.line;
-    this.pushFrame(f, label, callerLine);
-    const scope = this.top.scopes[0];
+    this.pushFrame(f, label, callerLine, ctx ? { thisCell: ctx.thisCell || null, cls: ctx.cls || null, constThis: !!ctx.constThis } : null);
     try {
-      for (let i = 0; i < f.params.length; i++) {
-        const p = f.params[i], a = args[i];
-        let v, lv = null;
-        if (!a) v = yield* this.ev(p.def); else { v = a.v; lv = a.lv; }
-        if (p.type.k === 'arr' && v.t === 'array') {
-          scope.set(p.name, { isRef: true, arrParam: true, name: p.name, cell: v.cell });
-          binds.push(`${C(p.name)} هي المصفوفة ${C(a.node.src)} نفسها (المصفوفة تُمرَّر بالمرجع دائمًا)`);
-        } else if (p.ref) {
-          if (!lv || lv.str) throw new CppError(`المعامل ${C(p.name)} بالمرجع ${C('&')} يجب أن يستقبل متغيرًا`, n.line);
-          scope.set(p.name, { isRef: true, name: p.name, cell: lv.cell });
-          binds.push(`${C(p.name)} مرجع إلى ${C(a.node.src)}، أي اسم آخر للمتغير نفسه`);
-        } else {
-          const ptype = p.type.k === 'arr' ? TPtr(p.type.of) : p.type;
-          const cell = this.makeCell(ptype, p.name, { isConst: p.isConst && ptype.k !== 'ptr' });
-          if (ptype.k === 'struct') this.writeRaw(cell, this.convert(v, ptype, callerLine, p.name), callerLine);
-          else cell.val = this.convert(v, ptype, callerLine, p.name);
-          scope.set(p.name, cell);
-          this.touch(cell);
-          const shown = ptype.k === 'struct' ? 'نسخة من السجل' : `<b>${esc(fmtShow(this.read(cell, callerLine)))}</b> (${!a ? 'القيمة الافتراضية' : ptype.k === 'ptr' ? 'نسخة من العنوان' : 'نسخة'})`;
-          binds.push(`${C(p.name)} = ${shown}`);
-        }
-      }
-      yield this.step(f.line, `استدعاء الدالة ${C(f.name)} من السطر ${callerLine}: ` + (binds.length ? binds.join('، و') + '.' : 'دون معاملات.'), { call: true });
+      const binds = yield* this.bindParams(f, args, callerLine);
+      let head;
+      if (isMethod && ctx.thisCell) head = `استدعاء الدالة ${C(ctx.cls.name + '::' + f.name)} على الكائن ${C(ctx.thisCell.label)} من السطر ${callerLine}، و${C('this')} يشير إليه` + (ctx.how === 'base' ? ` (نسخة الكلاس ${C(ctx.cls.name)} تحديدًا)` : '');
+      else if (isMethod) head = `استدعاء الدالة الثابتة ${C(ctx.cls.name + '::' + f.name)} من السطر ${callerLine} (دالة ${C('static')} لا تحتاج كائنًا)`;
+      else head = `استدعاء الدالة ${C(f.name)} من السطر ${callerLine}`;
+      yield this.step(f.line, head + (binds.length ? `: ${binds.join('، و')}.` : (isMethod ? '.' : ': دون معاملات.')) + (ctx && ctx.note ? ' ' + ctx.note : ''), { call: true });
+      let ret = null, keep = null;
       try {
         yield* this.block(f.body.body, false);
       } catch (e) {
-        if (e instanceof ReturnSig) {
-          if (f.ret.k === 'void') return { t: 'void' };
-          return this.convert(e.val, f.ret, e.line);
-        }
-        throw e;
+        if (!(e instanceof ReturnSig)) throw e;
+        ret = e; keep = e.cell || null;
+      }
+      yield* this.destroyScope(this.top.scopes[0], f.body.endLine, keep);
+      if (ret) {
+        if (f.ret.k === 'void') return { t: 'void' };
+        return this.convert(ret.val, f.ret, ret.line);
       }
       if (f.ret.k !== 'void' && f.name !== 'main') {
         this.pendingWarn = `الدالة ${C(f.name)} من النوع ${tstr(f.ret)} انتهت دون ${C('return')}، فالقيمة الراجعة عشوائية`;
@@ -1250,54 +1955,70 @@ class Interp {
       this.frames.pop();
     }
   }
-  resolve(list, args, n) {
+  resolveScore(f, args) {
     const argT = (a) => (a.v.t === 'array' ? a.v.cell.type : a.v.t === 'ptr' ? TPtr(a.v.to || TP('?')) : a.v.t === 'struct' ? TSt(a.v.name) : TP(a.v.t));
-    const score = (f) => {
-      const ps = f.params;
-      if (args.length > ps.length) return -1;
-      if (ps.slice(args.length).some((p) => !p.def)) return -1;
-      let s = 0;
-      for (let i = 0; i < args.length; i++) {
-        const p = ps[i], a = args[i], v = a.v, at = argT(a);
-        if (p.ref) {
-          if (!a.lv || a.lv.str) return -1;
-          if (!sameT(a.lv.cell.type, p.type) && !(p.type.k === 'ptr' && at.k === 'ptr' && (!at.to || at.to.k === '?' || sameT(p.type.to, at.to)))) return -1;
-          s += 3; continue;
-        }
-        if (p.type.k === 'arr') {
-          if (v.t === 'array' && sameT(elemBase(v.cell.type), elemBase(p.type)) && (v.cell.type.of.k === 'arr') === (p.type.of.k === 'arr')) { s += 3; continue; }
-          if (v.t === 'ptr' && v.to && sameT(v.to, p.type.of)) { s += 2; continue; }
+    const ps = f.params;
+    if (args.length > ps.length) return -1;
+    if (ps.slice(args.length).some((p) => !p.def)) return -1;
+    let s = 0;
+    for (let i = 0; i < args.length; i++) {
+      const p = ps[i], a = args[i], v = a.v, at = argT(a);
+      if (p.type.k === 'auto') { s += 1; continue; }
+      if (p.type.k === 'ostream') { if (v.t !== 'ostream') return -1; s += 3; continue; }
+      if (p.ref) {
+        if (!a.lv || a.lv.str) {
+          if (!p.isConst) return -1;
+          if (p.type.k === 'struct') { if (v.t !== 'struct' || !this.isDerived(v.name, p.type.name)) return -1; s += 2; continue; }
+          if (v.t === p.type.k || (isNumT(v.t) && isNumT(p.type.k))) { s += 2; continue; }
           return -1;
         }
-        if (p.type.k === 'ptr') {
-          if (v.t === 'ptr') { if (!v.to || v.to.k === '?' || (!v.cell && !v.arr) || sameT(v.to, p.type.to)) { s += 3; continue; } return -1; }
-          if (v.t === 'array' && sameT(v.cell.type.of, p.type.to)) { s += 2; continue; }
-          if (v.t === 'int' && v.v === 0) { s += 1; continue; }
-          return -1;
-        }
-        if (p.type.k === 'struct') { if (v.t === 'struct' && v.name === p.type.name) { s += 3; continue; } return -1; }
-        if (v.t === 'array' || v.t === 'ptr' || v.t === 'struct') {
-          if (p.type.k === 'string' && v.t === 'array' && v.cell.type.of.k === 'char') { s += 1; continue; }
-          return -1;
-        }
-        if (v.t === p.type.k || (isFloatK(v.t) && isFloatK(p.type.k))) s += 3;
-        else if (p.type.k === 'string' || v.t === 'string') { if (!(p.type.k === 'string' && v.t === 'char')) return -1; s += 1; }
-        else s += 1;
+        const ct = a.lv.cell.type;
+        if (sameT(ct, p.type)) { s += 3; continue; }
+        if (p.type.k === 'struct' && ct.k === 'struct' && this.isDerived(ct.name, p.type.name)) { s += 2; continue; }
+        if (p.type.k === 'ptr' && at.k === 'ptr' && (!at.to || at.to.k === '?' || sameT(p.type.to, at.to))) { s += 3; continue; }
+        if (p.isConst && v.t === p.type.k) { s += 2; continue; }
+        return -1;
       }
-      return s;
-    };
-    const scored = list.map((f) => ({ f, s: score(f) })).filter((x) => x.s >= 0).sort((a, b) => b.s - a.s);
+      if (p.type.k === 'arr') {
+        if (v.t === 'array' && sameT(elemBase(v.cell.type), elemBase(p.type)) && (v.cell.type.of.k === 'arr') === (p.type.of.k === 'arr')) { s += 3; continue; }
+        if (v.t === 'ptr' && v.to && sameT(v.to, p.type.of)) { s += 2; continue; }
+        return -1;
+      }
+      if (p.type.k === 'ptr') {
+        if (v.t === 'ptr') {
+          if (!v.to || v.to.k === '?' || (!v.cell && !v.arr) || sameT(v.to, p.type.to)) { s += 3; continue; }
+          if (v.to.k === 'struct' && p.type.to.k === 'struct' && this.isDerived(v.to.name, p.type.to.name)) { s += 2; continue; }
+          return -1;
+        }
+        if (v.t === 'array' && sameT(v.cell.type.of, p.type.to)) { s += 2; continue; }
+        if (v.t === 'int' && v.v === 0) { s += 1; continue; }
+        return -1;
+      }
+      if (p.type.k === 'struct') {
+        if (v.t === 'struct' && v.name === p.type.name) { s += 3; continue; }
+        if (v.t === 'struct' && this.isDerived(v.name, p.type.name)) { s += 1; continue; }
+        return -1;
+      }
+      if (v.t === 'array' || v.t === 'ptr' || v.t === 'struct' || v.t === 'ostream') {
+        if (p.type.k === 'string' && v.t === 'array' && v.cell.type.of.k === 'char') { s += 1; continue; }
+        return -1;
+      }
+      if (v.t === p.type.k || (isFloatK(v.t) && isFloatK(p.type.k))) s += 3;
+      else if (p.type.k === 'string' || v.t === 'string') { if (!(p.type.k === 'string' && v.t === 'char')) return -1; s += 1; }
+      else s += 1;
+    }
+    return s;
+  }
+  resolve(list, args, n) {
+    const scored = list.map((f) => ({ f, s: this.resolveScore(f, args) })).filter((x) => x.s >= 0).sort((a, b) => b.s - a.s);
     if (!scored.length) {
       const f = list[0];
       const need = f.params.filter((p) => !p.def).length;
       if (list.length === 1 && (args.length < need || args.length > f.params.length))
         throw new CppError(`الدالة ${C(f.name)} تحتاج ${need === f.params.length ? need : `من ${need} إلى ${f.params.length}`} ${f.params.length === 1 ? 'قيمة' : 'قيم'}، وأُرسل إليها ${args.length}`, n.line);
-      const refIdx = f.params.findIndex((p, i) => p.ref && args[i] && !args[i].lv);
+      const refIdx = f.params.findIndex((p, i) => p.ref && !p.isConst && args[i] && !args[i].lv);
       if (list.length === 1 && refIdx >= 0) throw new CppError(`المعامل ${C(f.params[refIdx].name)} بالمرجع ${C('&')} يجب أن يستقبل متغيرًا، و ${C(args[refIdx].node.src)} ليس متغيرًا`, n.line);
       if (list.length === 1) {
-        const bad = f.params.findIndex((p, i) => args[i] && score({ params: [p] }) === -1 && i === 0) ;
-        const k = f.params.findIndex((p, i) => args[i] && (() => { const save = args; return false; })());
-        void bad; void k;
         const idx = f.params.findIndex((p, i) => args[i] && (p.type.k === 'arr' ? args[i].v.t !== 'array' && args[i].v.t !== 'ptr' : args[i].v.t === 'array' && p.type.k !== 'ptr' && p.type.k !== 'string'));
         if (idx >= 0) throw new CppError(f.params[idx].type.k === 'arr' ? `المعامل ${C(f.params[idx].name)} مصفوفة، فيجب إرسال اسم مصفوفة دون أقواس` : `المعامل ${C(f.params[idx].name)} ليس مصفوفة، ولا يمكن إرسال مصفوفة كاملة إليه`, n.line);
       }
@@ -1444,7 +2165,8 @@ class Interp {
         const main = P.funcs.get('main')[0];
         this.pushFrame(main, 'main', null);
         yield this.step(main.line, `يبدأ تنفيذ البرنامج من الدالة ${C('main')}.`);
-        yield* this.block(main.body.body, false);
+        try { yield* this.block(main.body.body, false); } catch (e) { if (!(e instanceof ReturnSig)) throw e; }
+        yield* this.destroyScope(this.top.scopes[0], main.body.endLine);
       }
     } catch (e) {
       if (!(e instanceof ReturnSig)) throw e;
@@ -1453,10 +2175,56 @@ class Interp {
     const leak = this.heap.filter((h) => !h.freed).length;
     yield { type: 'step', line: null, msg: 'انتهى تنفيذ البرنامج.' + (leak ? ` بقي في الذاكرة الديناميكية ${leak} ${leak === 1 ? 'مكان' : 'أماكن'} لم تُحذف بـ ${C('delete')} (memory leak).` : ''), end: true };
   }
-  *block(stmts, fresh) {
+  *block(stmts, fresh, endLine) {
     if (fresh) this.scopes.push(new Map());
     try { for (const s of stmts) yield* this.exec(s); }
-    finally { if (fresh) this.scopes.pop(); }
+    catch (e) {
+      if (fresh) {
+        if (e instanceof ReturnSig || e instanceof BreakSig || e instanceof ContinueSig) yield* this.destroyScope(this.scopes[this.scopes.length - 1], e.line, e.cell);
+        this.scopes.pop();
+      }
+      throw e;
+    }
+    if (fresh) { yield* this.destroyScope(this.scopes[this.scopes.length - 1], endLine); this.scopes.pop(); }
+  }
+  *initObject(cell, d, def) {
+    const argsOf = function* (node) { return node.k === 'construct' ? yield* this.evalArgs(node.args) : node.k === 'list' ? yield* this.evalArgs(node.items) : yield* this.evalArgs([node]); }.bind(this);
+    if (cell.type.k === 'arr') {
+      const items = d.init && d.init.k === 'list' ? d.init.items : [];
+      if (cell.type.of.k !== 'struct') throw new CppError('المختبر يدعم مصفوفات الكائنات الأحادية فقط', d.line);
+      for (let i = 0; i < cell.elems.length; i++) yield* this.construct(cell.elems[i], items[i] ? yield* argsOf(items[i]) : [], d, 'array');
+      yield this.step(d.line, `تعريف مصفوفة الكائنات ${C(d.name)} من ${cell.elems.length} كائنات ${C(def.name)}، ونُفِّذ الـ constructor لكل عنصر.`);
+      return;
+    }
+    let msg;
+    if (d.ctorArgs) {
+      yield* this.construct(cell, yield* this.evalArgs(d.ctorArgs), d, 'decl');
+      msg = `الكائن ${C(d.name)} من الكلاس ${C(def.name)} جاهز بعد تنفيذ الـ constructor بالقيم ${C('(' + d.ctorArgs.map((a) => a.src).join(', ') + ')')}.`;
+    } else if (d.init && ((d.init.k === 'construct' && d.init.type.name === def.name) || d.init.k === 'list')) {
+      yield* this.construct(cell, yield* argsOf(d.init), d, 'decl');
+      msg = `الكائن ${C(d.name)} من الكلاس ${C(def.name)} جاهز بعد تنفيذ الـ constructor.`;
+    } else if (d.init) {
+      const a = (yield* this.evalArgs([d.init]))[0];
+      if (a.v.t === 'struct' && this.isDerived(a.v.name, def.name)) {
+        const cc = this.copyCtor(def);
+        if (cc && a.lv && a.v.name === def.name) {
+          yield this.step(d.line, `${C(d.name)} يُنشأ نسخةً من الكائن ${C(d.init.src)}، فيُستدعى الـ copy constructor.`);
+          yield* this.construct(cell, [a], d, 'copy');
+          msg = `الكائن ${C(d.name)} نسخة مستقلة من ${C(d.init.src)}.`;
+        } else {
+          this.writeRaw(cell, this.convert(a.v, cell.type, d.line, d.name), d.line);
+          msg = a.lv ? `الكائن ${C(d.name)} يُنشأ نسخةً من ${C(d.init.src)}: تُنسخ الحقول حقلًا حقلًا (copy constructor الافتراضي)، والنسخة مستقلة عن الأصل.`
+            : `الكائن ${C(d.name)} يأخذ نتيجة ${C(d.init.src)} مباشرة.`;
+        }
+      } else {
+        yield* this.construct(cell, [a], d, 'decl');
+        msg = `الكائن ${C(d.name)} من الكلاس ${C(def.name)} جاهز بعد تنفيذ الـ constructor بالقيمة ${C(d.init.src)}.`;
+      }
+    } else {
+      yield* this.construct(cell, [], d, 'decl');
+      msg = def.ctors.length ? `الكائن ${C(d.name)} من الكلاس ${C(def.name)} جاهز بعد تنفيذ الـ default constructor.` : `تعريف الكائن ${C(d.name)} من الكلاس ${C(def.name)}.`;
+    }
+    yield this.step(d.line, msg);
   }
   *readToken(type, label, stmtLine) {
     for (;;) {
@@ -1482,8 +2250,8 @@ class Interp {
       if (d.ref) {
         const lv = yield* this.lv(d.init);
         if (lv.str) throw new CppError('لا يمكن ربط مرجع بحرف داخل نص', d.line);
-        if (!sameT(lv.cell.type, d.type)) throw new CppError(`نوع المرجع ${C(d.name)} يجب أن يطابق نوع ${C(d.init.src)}`, d.line);
-        scope.set(d.name, { isRef: true, name: d.name, cell: lv.cell });
+        if (!sameT(lv.cell.type, d.type) && !(d.type.k === 'struct' && lv.cell.type.k === 'struct' && this.isDerived(lv.cell.type.name, d.type.name))) throw new CppError(`نوع المرجع ${C(d.name)} يجب أن يطابق نوع ${C(d.init.src)}`, d.line);
+        scope.set(d.name, { isRef: true, name: d.name, cell: lv.cell, rtype: d.type.k === 'struct' ? d.type : null });
         yield this.step(d.line, `تعريف المرجع ${C(d.name)}: اسم آخر للمتغير ${C(d.init.src)} نفسه، وأي تغيير على أحدهما يظهر في الآخر.`);
         continue;
       }
@@ -1503,10 +2271,16 @@ class Interp {
         for (let i = dims.length - 1; i >= 0; i--) type = TArr(type, dims[i]);
       }
       const cell = this.makeCell(type, d.name, { isConst: s.isConst, global: isGlobal });
+      const cdef = type.k === 'struct' ? this.structs.get(type.name) : type.k === 'arr' && type.of.k === 'struct' ? this.structs.get(type.of.name) : null;
+      if (cdef && (this.hasCtorLogic(cdef) || d.ctorArgs || (cdef.pureLeft && cdef.pureLeft.length) || (d.init && d.init.k === 'construct')) && !(d.init && d.init.k === 'list' && !cdef.ctors.length)) {
+        scope.set(d.name, cell); this.touch(cell);
+        yield* this.initObject(cell, d, cdef);
+        continue;
+      }
       if (isGlobal && !d.init) this.zero(cell);
       let msg;
       const T = tstr(d.dims.length ? elemBase(type) : type);
-      const kindAr = type.k === 'arr' ? (type.of.k === 'char' ? 'مصفوفة الحروف' : 'المصفوفة') : type.k === 'ptr' ? 'المؤشر' : type.k === 'struct' ? 'السجل' : isGlobal ? 'المتغير العام' : s.isConst ? 'الثابت' : 'المتغير';
+      const kindAr = type.k === 'arr' ? (type.of.k === 'char' ? 'مصفوفة الحروف' : 'المصفوفة') : type.k === 'ptr' ? 'المؤشر' : type.k === 'struct' ? (cdef && cdef.isClass ? 'الكائن' : 'السجل') : isGlobal ? 'المتغير العام' : s.isConst ? 'الثابت' : 'المتغير';
       const head = `تعريف ${kindAr}${isGlobal && type.k !== 'int' ? ' العام' : ''} ${C(d.name)} من النوع ${C(type.k === 'arr' ? tstr(type) : T)}`;
       if (type.k === 'arr') {
         const dims = []; for (let t = type; t.k === 'arr'; t = t.of) dims.push(t.n);
@@ -1559,7 +2333,7 @@ class Interp {
   }
   *exec(s) {
     switch (s.k) {
-      case 'block': yield* this.block(s.body, true); return;
+      case 'block': yield* this.block(s.body, true, s.endLine); return;
       case 'empty': return;
       case 'decl': yield* this.declare(s, this.scopes[this.scopes.length - 1], false); return;
       case 'expr': {
@@ -1579,17 +2353,53 @@ class Interp {
         if (tgt.freed) throw new CppError(`${C(tgt.label)} حُذفت مسبقًا، ولا يجوز حذفها مرتين`, s.line);
         if (tgt.type.k === 'arr' && !s.arr) this.pendingWarn = `المصفوفة التي حُجزت بـ ${C('new[]')} تُحذف بـ ${C('delete[]')}`;
         const mark = (c) => { c.freed = true; this.changed.add(c.uid); if (c.elems) c.elems.forEach(mark); if (c.fields) c.fields.forEach(mark); };
+        const ddef = tgt.type.k === 'struct' ? this.structs.get(tgt.type.name) : tgt.type.k === 'arr' && tgt.type.of.k === 'struct' ? this.structs.get(tgt.type.of.name) : null;
+        if (ddef && this.hasDtorLogic(ddef)) {
+          if (tgt.type.k === 'arr') { for (const e of [...tgt.elems].reverse()) yield* this.destroy(e, s.line, 'delete'); }
+          else {
+            const st = v.to && v.to.k === 'struct' ? v.to.name : ddef.name;
+            const sdef = this.structs.get(st);
+            if (st !== ddef.name && !(sdef.dtor && sdef.dtor.isVirtual)) {
+              yield* this.destroy(tgt, s.line, 'delete', st);
+              this.pendingWarn = `المؤشر نوعه ${C(st + '*')} والكائن الحقيقي من النوع ${C(ddef.name)}، والـ destructor في ${C(st)} ليس ${C('virtual')}، فلم يُستدعَ destructor الابن ${C('~' + ddef.name + '()')}. اكتب ${C('virtual ~' + st + '()')} في الكلاس الأب`;
+            } else yield* this.destroy(tgt, s.line, 'delete');
+          }
+        }
         mark(tgt);
-        yield this.step(s.line, `${C(s.src.replace(/;$/, ''))} تحرّر ${tgt.type.k === 'struct' ? 'العقدة' : 'الذاكرة'} ${C(tgt.label)} من الذاكرة الديناميكية. المؤشر ${C(s.e.src)} ما زال يحمل العنوان القديم، فلا تستخدمه بعد الآن قبل أن تعطيه قيمة جديدة.`);
+        yield this.step(s.line, `${C(s.src.replace(/;$/, ''))} تحرّر ${tgt.type.k === 'struct' ? (this.structs.get(tgt.type.name).isClass ? 'الكائن' : 'العقدة') : 'الذاكرة'} ${C(tgt.label)} من الذاكرة الديناميكية. المؤشر ${C(s.e.src)} ما زال يحمل العنوان القديم، فلا تستخدمه بعد الآن قبل أن تعطيه قيمة جديدة.`);
         return;
       }
       case 'cout': {
         let text = '';
         const parts = [];
+        const sname = s.stream || 'cout';
+        if (s.stream) {
+          const e = this.entry(s.stream, s.line);
+          const sv = e.isRef ? e.cell.val : e.val;
+          if (!sv || sv.t !== 'ostream') throw new CppError(`${C(s.stream)} ليس مجرى إخراج (ostream)، فلا يُستخدم معه ${C('<<')}`, s.line);
+        }
         for (const it of s.items) {
           if (it.k === 'endl') { text += '\n'; parts.push(C('endl') + ' (سطر جديد)'); continue; }
           const before = this.sub(it);
-          const v = yield* this.ev(it);
+          let lvI = null, v;
+          if (['var', 'index', 'member', 'arrow', 'deref', 'scoped'].includes(it.k)) { lvI = yield* this.lv(it); v = this.getLv(lvI, it.line, it.src); }
+          else v = yield* this.ev(it);
+          if (v.t === 'struct') {
+            const g = this.prog.funcs.get('operator<<');
+            if (!g) throw new CppError(`لا يمكن طباعة الكائن ${C(it.src)} مباشرة بـ cout. اطبع حقوله، أو عرّف الدالة ${C(`ostream& operator<<(ostream& out, const ${v.name}& obj)`)}`, s.line);
+            if (text) {
+              this.output += text;
+              yield this.step(s.line, `${C(sname)} تطبع ${parts.join('، ثم ')}، ثم تستدعي ${C('operator<<')} لطباعة الكائن ${C(it.src)}.`, { out: text });
+              text = ''; parts.length = 0;
+            }
+            const o0 = this.output.length;
+            const sc = this.makeCell(TP('ostream'), sname); sc.val = { t: 'ostream' };
+            const args = [{ v: { t: 'ostream' }, lv: { cell: sc }, node: { src: sname } }, { v, lv: lvI, node: it }];
+            const node = { name: 'operator<<', line: s.line, src: `${sname} << ${it.src}`, args: [] };
+            yield* this.invoke(this.resolve(g, args, node), args, node, null);
+            parts.push(`الكائن ${C(it.src)} عن طريق ${C('operator<<')}: ${C(this.output.slice(o0).replace(/\n/g, '⏎'))}`);
+            continue;
+          }
           if (v.t === 'void') throw new CppError(`الدالة ${C(it.src)} من النوع void ولا تُرجع قيمة لطباعتها`, s.line);
           if (v.t === 'struct') throw new CppError(`لا يمكن طباعة السجل ${C(it.src)} كاملًا. اطبع حقوله واحدًا واحدًا مثل ${C(it.src + '.name')}`, s.line);
           let o;
@@ -1604,7 +2414,7 @@ class Interp {
         }
         this.output += text;
         const shown = text.replace(/\n/g, '⏎');
-        yield this.step(s.line, `${C('cout')} تطبع على الشاشة: ${parts.join('، ثم ')}.` + (shown.trim() ? ` يظهر في الكونسول: ${C(shown)}` : ''), { out: text });
+        yield this.step(s.line, `${C(sname)} تطبع على الشاشة: ${parts.join('، ثم ')}.` + (shown.trim() ? ` يظهر في الكونسول: ${C(shown)}` : ''), { out: text });
         return;
       }
       case 'cin': {
@@ -1690,7 +2500,9 @@ class Interp {
           msg = this.frames.length <= 1 ? `${C('return')} تُنهي البرنامج.` : `${C('return')} تُنهي الدالة ${C(fn.name)}، ويعود التنفيذ إلى السطر ${this.top.callLine}.`;
         }
         yield this.step(s.line, msg);
-        throw new ReturnSig(s.line, val);
+        const sig = new ReturnSig(s.line, val);
+        if (s.e && s.e.k === 'var') { const e = this.entry(s.e.name, s.line, true); if (e && !e.isRef && e.type && e.type.k === 'struct') sig.cell = e; }
+        throw sig;
       }
     }
     throw new CppError('جملة غير مدعومة', s.line);
@@ -1786,6 +2598,7 @@ class Interp {
     this.frames.forEach((fr, i) => {
       if (fr.label === 'global') return;
       const vars = [];
+      if (fr.thisCell) vars.push({ name: 'this', type: fr.cls.name + '*', d: { kind: 'ptr', show: '→ ' + fr.thisCell.label } });
       for (const sc of fr.scopes) for (const [k, e] of sc) vars.push(varOf(k, e));
       frames.push({ title: fr.fn.name === 'main' ? 'main' : fr.label, current: i === this.frames.length - 1, callLine: fr.callLine, vars });
     });

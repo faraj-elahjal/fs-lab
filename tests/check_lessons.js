@@ -7,6 +7,7 @@ require('../js/lessons_p2b.js');
 require('../js/lessons_ds.js');
 require('../js/java.js');
 require('../js/lessons_oop.js');
+require('../js/lessons_oopcpp.js');
 let runAll = globalThis.FSCpp.runAll;
 const P = (b) => `#include <iostream>\nusing namespace std;\nint main() {\n${b}\nreturn 0;\n}`;
 const Q = (fns, b) => `#include <iostream>
@@ -76,7 +77,7 @@ for (const L of window.FS_LESSONS) {
   runAll = (L.lang === 'java' ? globalThis.FSJava : globalThis.FSCpp).runAll;
   for (const x of L.examples) {
     const r = runAll(x.code, x.input || '');
-    if (L.lang === 'java' && !!r.error !== !!x.err) { bad++; console.log(`  ${x.id}: ${x.err ? 'expected an error' : 'unexpected error ' + r.error}`); }
+    if ((L.lang === 'java' || L.variant) && !!r.error !== !!x.err) { bad++; console.log(`  ${x.id}: ${x.err ? 'expected an error' : 'unexpected error ' + r.error}`); }
     console.log(`[${x.id}] ${r.error ? 'ERROR line ' + r.line + ': ' + r.error.replace(/<[^>]+>/g, '') : JSON.stringify(r.output)}`);
   }
   for (const c of L.challenges) {

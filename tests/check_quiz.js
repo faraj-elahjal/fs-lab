@@ -1,6 +1,6 @@
 // node site/tests/check_quiz.js — every tracing question runs, every MCQ answer index is valid, every essay model answer runs on its inputs
 globalThis.window = globalThis;
-for (const f of ['interpreter', 'java', 'lessons', 'lessons_p2', 'lessons_p2b', 'lessons_ds', 'lessons_oop', 'quiz_core', 'quiz_p1', 'quiz_p2', 'quiz_ds', 'quiz_bank_p1', 'quiz_bank_p2', 'quiz_bank_ds', 'quiz_oop']) require('../js/' + f + '.js');
+for (const f of ['interpreter', 'java', 'lessons', 'lessons_p2', 'lessons_p2b', 'lessons_ds', 'lessons_oop', 'lessons_oopcpp', 'quiz_core', 'quiz_p1', 'quiz_p2', 'quiz_ds', 'quiz_bank_p1', 'quiz_bank_p2', 'quiz_bank_ds', 'quiz_oop', 'quiz_oopcpp']) require('../js/' + f + '.js');
 let runAll;
 const show = process.argv.includes('--show');
 let bad = 0, nq = 0, ne = 0;
