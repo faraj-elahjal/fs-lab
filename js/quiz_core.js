@@ -9,7 +9,10 @@ window.FS_Q = {
   F,
   P: (body) => F('', body),
   S: (body) => `#include <iostream>\n#include <string>\nusing namespace std;\n\nint main() {\n${ind(body)}\n    return 0;\n}\n`,
+  // Java: J(classes, mainBody, imports?) → full program with public class Main
+  J: (classes, body, imp) => `${imp ? imp.trim() + '\n\n' : ''}${classes ? classes.trim() + '\n\n' : ''}public class Main {\n    public static void main(String[] args) {\n${ind(ind(body))}\n    }\n}\n`,
 };
+window.FS_engine = (L) => (L && L.lang === 'java' ? window.FSJava : window.FSCpp);
 window.FS_addQuiz = function (id, quiz, essays) {
   const L = window.FS_LESSONS.find((x) => x.id === id);
   if (!L) throw new Error('no lesson ' + id);
@@ -19,7 +22,7 @@ window.FS_addQuiz = function (id, quiz, essays) {
     let cache = null;
     Object.defineProperty(c, 'tests', {
       enumerable: true,
-      get() { return cache || (cache = c.inputs.map((i) => ({ input: i, output: window.FSCpp.runAll(c.ref, i).output }))); },
+      get() { return cache || (cache = c.inputs.map((i) => ({ input: i, output: window.FS_engine(L).runAll(c.ref, i).output }))); },
     });
     L.challenges.push(c);
   });

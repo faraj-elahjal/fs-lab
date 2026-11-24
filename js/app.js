@@ -11,9 +11,10 @@ const store = {
 
 /* ---------------- editor ---------------- */
 const code = $('code'), hl = $('hl'), gutter = $('gutter'), wrap = $('wrap'), lnbar = $('lnbar');
-const KW = new Set(['return', 'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default', 'break', 'continue', 'using', 'namespace', 'const', 'true', 'false']);
-const TY = new Set(['int', 'double', 'float', 'char', 'bool', 'string', 'void', 'long', 'short', 'unsigned', 'auto']);
-const LIB = new Set(['cout', 'cin', 'endl', 'std', 'main', 'pow', 'sqrt', 'abs', 'static_cast']);
+const KW = new Set(['return', 'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default', 'break', 'continue', 'using', 'namespace', 'const', 'true', 'false',
+  'class', 'public', 'private', 'protected', 'static', 'final', 'abstract', 'new', 'this', 'super', 'extends', 'implements', 'interface', 'enum', 'import', 'package', 'null', 'nullptr', 'instanceof', 'try', 'catch', 'finally', 'throw', 'throws', 'struct', 'delete']);
+const TY = new Set(['int', 'double', 'float', 'char', 'bool', 'string', 'void', 'long', 'short', 'unsigned', 'auto', 'boolean', 'byte', 'String', 'Integer', 'Double', 'Character', 'Boolean', 'Object', 'Scanner', 'ArrayList', 'LinkedList', 'List']);
+const LIB = new Set(['cout', 'cin', 'endl', 'std', 'main', 'pow', 'sqrt', 'abs', 'static_cast', 'System', 'out', 'println', 'print', 'printf', 'Math', 'Arrays', 'Collections']);
 const TOK = /(\/\/.*$)|(#.*$)|("(?:[^"\\]|\\.)*"?)|('(?:[^'\\]|\\.)*'?)|(\b\d+(?:\.\d+)?\b)|([A-Za-z_]\w*)|(\s+)|(.)/gm;
 function colorize(src) {
   let out = '', m;
@@ -88,6 +89,7 @@ const COURSE_INFO = {
   'برمجة 1': { sub: 'المتغيرات، والعمليات الحسابية، والشروط، والحلقات، والمصفوفات الأحادية.', c: '#2dd4bf' },
   'برمجة 2': { sub: 'الدوال، والمصفوفات الأحادية والثنائية، والنصوص، والمؤشرات، والذاكرة الديناميكية، والسجلات.', c: '#3b82f6' },
   'هياكل البيانات': { sub: 'القوائم المترابطة، والمكدس، والطابور، والاستدعاء الذاتي، والأشجار، والترتيب والبحث.', c: '#f59e42' },
+  'البرمجة الشيئية OOP': { sub: 'بلغة <bdi>Java</bdi>: الكلاسات والكائنات، والتغليف، والوراثة، وتعدد الأشكال، والتجريد، والعلاقات بين الكلاسات، والأنواع العامة <bdi>Generics</bdi>.', c: '#facc15' },
 };
 const cinfo = (c) => COURSE_INFO[c] || { sub: '', c: '#2dd4bf' };
 const QN = 10;                                           // questions per quiz attempt (drawn from the lesson's bank)
@@ -123,7 +125,7 @@ const bar = (x, c) => `<div class="bar"><i style="width:${Math.round(100 * x)}%;
 
 /* ---- home ---- */
 function viewHome() {
-  show('vHome'); renderNav('home'); document.title = 'FS_Lab · مختبر C++ التفاعلي';
+  show('vHome'); renderNav('home'); document.title = 'FS_Lab · مختبر البرمجة التفاعلي';
   const lastH = store.get('last', ''), last = parseHash(lastH), lastL = last[0] === 'l' && LESSONS.find((L) => L.id === last[1]);
   const nQ = LESSONS.reduce((a, L) => a + nQuiz(L), 0), nC = LESSONS.reduce((a, L) => a + L.challenges.length, 0), nE = LESSONS.reduce((a, L) => a + L.examples.length, 0);
   const cont = lastL
@@ -132,7 +134,7 @@ function viewHome() {
   $('vHome').innerHTML = `
   <section class="hero">
     <div class="hero-t">
-      <span class="eyebrow">مختبر <bdi dir="ltr">C++</bdi> التفاعلي</span>
+      <span class="eyebrow">مختبر <bdi dir="ltr">C++</bdi> و <bdi dir="ltr">Java</bdi> التفاعلي</span>
       <h1>افهم ما يحدث <em>داخل</em> برنامجك، سطرًا بسطر</h1>
       <p>اختر مثالًا أو اكتب برنامجك، ثم نفّذه خطوة بخطوة: ترى قيمة كل متغير في الذاكرة، ونتيجة كل شرط، وجدول تتبّع الحلقات، وما يظهر على الشاشة، مع شرح بالعربية لكل خطوة.</p>
       <div class="cta">${cont}<a class="btn big ghost" href="#/c/0" id="toCourses">تصفّح المواد</a></div>
@@ -349,9 +351,10 @@ function renderIdle() {
 function begin() {
   errLine = null;
   let prog;
-  try { prog = FSCpp.compile(code.value); }
+  const E = FS_engine(lesson);
+  try { prog = E.compile(code.value); }
   catch (e) { showError(e); return false; }
-  const it = new FSCpp.Interp(prog);
+  const it = new E.Interp(prog);
   session = { it, gen: it.run(), hist: [], pos: -1, waiting: null, finished: false, transcript: [], error: null, inputs: [], errAt: null };
   ahead();
   return true;
@@ -475,7 +478,7 @@ function atEndActions() {                // reached the last known step: ask for
   else if (S.errAt) showError(S.errAt);
 }
 function showError(e) {
-  if (!(e instanceof FSCpp.CppError)) { console.error(e); e = { message: 'حدث خطأ غير متوقع في المختبر', line: null }; }
+  if (!(e instanceof FSCpp.CppError) && !(window.FSJava && e instanceof FSJava.JavaError)) { console.error(e); e = { message: 'حدث خطأ غير متوقع في المختبر', line: null }; }
   stopPlay();
   errLine = e.line; curLine = null;
   if (session) { session.error = e; session.finished = true; }
@@ -601,11 +604,11 @@ function renderMem(frames, heap, structures) {
   const many = real.length > 1;
   if (!real.some((f) => f.vars.length) && !(heap && heap.length)) { $('mem').innerHTML = '<div class="empty">لا توجد متغيرات بعد</div>'; return; }
   html += real.map((f) => `<div class="frame ${many && f.current ? 'cur' : ''} ${f.global ? 'glob' : ''} ${many || (heap && heap.length) ? '' : 'plain'}">
-    ${many || (heap && heap.length) ? `<div class="fh">${f.global ? 'المتغيرات العامة' : f.title === 'main' ? 'الدالة main' : 'الدالة ' + esc(f.title)}${f.callLine ? ` <span>· استُدعيت من السطر ${f.callLine}</span>` : ''}</div>` : ''}
+    ${many || (heap && heap.length) ? `<div class="fh">${f.global ? 'المتغيرات العامة' : f.title === 'main' ? 'الدالة main' : (/^[A-Z]\w*\(/.test(f.title) ? 'الـ constructor ' : 'الدالة ') + esc(f.title)}${f.callLine ? ` <span>· استُدعيت من السطر ${f.callLine}</span>` : ''}</div>` : ''}
     <div class="fv">${f.vars.length ? f.vars.map(varHtml).join('') : '<div class="empty">لا توجد متغيرات</div>'}</div></div>`).join('');
   if (heap && heap.length) {
-    html += `<div class="frame heap"><div class="fh">الذاكرة الديناميكية (heap) <span>· ما حُجز بـ new</span></div><div class="fv">${heap.map((h) =>
-      `<div class="var hp ${h.freed ? 'freed' : ''} ${h.d.chg ? 'chg' : ''}"><div class="nm">${esc(h.label)}${h.freed ? ' · محذوفة' : ''}</div>${descHtml(h.d)}<div class="ty">${esc(h.type)}</div></div>`).join('')}</div></div>`;
+    html += `<div class="frame heap"><div class="fh">${FS_engine(lesson) === window.FSJava ? 'الكائنات في الذاكرة (heap)' : 'الذاكرة الديناميكية (heap)'} <span>· ما حُجز بـ new</span></div><div class="fv">${heap.map((h) =>
+      `<div class="var hp ${h.d.kind === 'arr' || h.d.kind === 'chars' ? 'arr' : ''} ${h.freed ? 'freed' : ''} ${h.gc ? 'gcd' : ''} ${h.d.chg ? 'chg' : ''}" ${h.gc ? 'title="لا يشير إليه أي متغير، وسيحذفه Garbage Collector تلقائيًا"' : ''}><div class="nm">${esc(h.label)}${h.freed ? ' · محذوفة' : h.gc ? ' · بلا مرجع' : ''}</div>${descHtml(h.d)}<div class="ty">${esc(h.type)}</div></div>`).join('')}</div></div>`;
   }
   $('mem').innerHTML = html;
 }
@@ -715,7 +718,7 @@ $('bCheck').onclick = () => {
   if (!item || !item.tests) return;
   let pass = 0;
   const rows = item.tests.map((t, i) => {
-    const r = FSCpp.runAll(code.value, t.input);
+    const r = FS_engine(lesson).runAll(code.value, t.input);
     const ok = !r.error && norm(r.output) === norm(t.output);
     if (ok) pass++;
     return `<div class="t ${ok ? 'ok' : 'bad'}"><b>${ok ? '✓' : '✗'} الاختبار ${i + 1}</b>
@@ -812,7 +815,7 @@ function quizRender() {
       done(ok);
     });
   } else {
-    const r = FSCpp.runAll(x.code, x.input || '');
+    const r = FS_engine(L).runAll(x.code, x.input || '');
     $('qCheck').onclick = () => {
       if (Q.answered) return;
       const v = $('qAns').value;

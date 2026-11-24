@@ -1,11 +1,12 @@
 // node site/tests/check_quiz.js — every tracing question runs, every MCQ answer index is valid, every essay model answer runs on its inputs
 globalThis.window = globalThis;
-for (const f of ['interpreter', 'lessons', 'lessons_p2', 'lessons_p2b', 'lessons_ds', 'quiz_core', 'quiz_p1', 'quiz_p2', 'quiz_ds', 'quiz_bank_p1', 'quiz_bank_p2', 'quiz_bank_ds']) require('../js/' + f + '.js');
-const { runAll } = globalThis.FSCpp;
+for (const f of ['interpreter', 'java', 'lessons', 'lessons_p2', 'lessons_p2b', 'lessons_ds', 'lessons_oop', 'quiz_core', 'quiz_p1', 'quiz_p2', 'quiz_ds', 'quiz_bank_p1', 'quiz_bank_p2', 'quiz_bank_ds', 'quiz_oop']) require('../js/' + f + '.js');
+let runAll;
 const show = process.argv.includes('--show');
 let bad = 0, nq = 0, ne = 0;
 const ids = new Set();
 for (const L of globalThis.FS_LESSONS) {
+  runAll = globalThis.FS_engine(L).runAll;
   (L.quiz || []).forEach((x, i) => {
     nq++;
     const tag = `${L.id} q${i + 1}`;
